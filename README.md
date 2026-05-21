@@ -36,14 +36,26 @@ It is currently an early release (`0.1.0`) focused on MySQL, PostgreSQL, and SQL
 
 ## Getting Started
 
-1. Install the extension.
+1. Install the extension from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=thanoguyn.tablepro-vscode).
 2. Open the TablePro activity bar item.
 3. Click **New Connection**.
 4. Choose a database type and enter connection details.
 5. Click **Connect**.
 6. Browse the schema tree or create a new SQL query.
 
-For VSIX installation instructions, see [INSTALL_VSIX.md](./INSTALL_VSIX.md).
+Marketplace install:
+
+```bash
+code --install-extension thanoguyn.tablepro-vscode
+```
+
+You can also install it from VS Code:
+
+1. Open **Extensions**.
+2. Search for **TablePro Vscode - Database Client**.
+3. Click **Install**.
+
+For manual VSIX installation instructions, see [INSTALL_VSIX.md](./INSTALL_VSIX.md).
 
 Quick install from GitHub:
 
