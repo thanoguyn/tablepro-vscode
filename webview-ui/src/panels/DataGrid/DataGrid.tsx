@@ -110,6 +110,7 @@ export default function DataGrid() {
   const [csvMenuOpen, setCsvMenuOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<GridLogEntry[]>([]);
   const [showLogDrawer, setShowLogDrawer] = useState(false);
+  const [selectedLogId, setSelectedLogId] = useState<number | null>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
   const csvMenuRef = useRef<HTMLDivElement>(null);
   const hasDeletedRef = useRef(false);
@@ -123,6 +124,7 @@ export default function DataGrid() {
       message,
     };
     setLogEntries(prev => [entry, ...prev].slice(0, 100));
+    setSelectedLogId(prev => prev ?? entry.id);
   }
 
   function showStatus(kind: 'success' | 'error' | 'info', text: string) {
@@ -988,6 +990,7 @@ export default function DataGrid() {
   if (result.columns.length === 0) return <div className="datagrid-message"><div className="message-icon">✅</div><h3>{result.affectedRows} rows affected</h3><p className="text-muted">{result.executionTime}ms</p></div>;
 
   const latestLog = logEntries[0];
+  const selectedLog = logEntries.find(entry => entry.id === selectedLogId) || latestLog;
 
   return (
     <div className="datagrid" onKeyDown={handleKeyDown} tabIndex={0}>
@@ -1172,13 +1175,34 @@ export default function DataGrid() {
         <div className="datagrid-log-drawer">
           {logEntries.length === 0 ? (
             <div className="log-empty">No logs yet</div>
-          ) : logEntries.map(entry => (
-            <div key={entry.id} className={`log-entry ${entry.level}`}>
-              <span className="log-time">{entry.time}</span>
-              <span className="log-level">{entry.level}</span>
-              <span className="log-message">{entry.message}</span>
+          ) : (
+            <div className="log-outlook-layout">
+              <div className="log-list" role="list">
+                {logEntries.map(entry => (
+                  <button
+                    key={entry.id}
+                    className={`log-list-item ${entry.level}${selectedLog?.id === entry.id ? ' active' : ''}`}
+                    onClick={() => setSelectedLogId(entry.id)}
+                  >
+                    <span className="log-list-level">{entry.level}</span>
+                    <span className="log-list-message">{entry.message}</span>
+                    <span className="log-list-time">{entry.time}</span>
+                  </button>
+                ))}
+              </div>
+              <div className={`log-detail ${selectedLog?.level || 'info'}`}>
+                {selectedLog && (
+                  <>
+                    <div className="log-detail-header">
+                      <span className="log-detail-level">{selectedLog.level}</span>
+                      <span className="log-detail-time">{selectedLog.time}</span>
+                    </div>
+                    <pre className="log-detail-message">{selectedLog.message}</pre>
+                  </>
+                )}
+              </div>
             </div>
-          ))}
+          )}
         </div>
       )}
       {copyStatus && <div className={`datagrid-toast ${copyStatus.kind}`}>{copyStatus.text}</div>}

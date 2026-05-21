@@ -157,24 +157,71 @@ tr:hover .row-actions, tr.selected .row-actions { opacity: 1; }
 .log-time { flex-shrink: 0; color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family, monospace); }
 .log-message { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .datagrid-log-drawer {
-  max-height: 150px;
-  overflow: auto;
+  height: 190px;
   flex-shrink: 0;
   background: var(--vscode-editor-background);
   border-top: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.08));
-  font-family: var(--vscode-editor-font-family, monospace);
   font-size: 11px;
 }
-.log-entry {
-  display: grid;
-  grid-template-columns: 72px 58px minmax(0, 1fr);
-  gap: 8px;
-  padding: 4px 10px;
-  border-bottom: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.04));
+.log-outlook-layout { display: grid; grid-template-columns: minmax(220px, 34%) minmax(0, 1fr); height: 100%; min-height: 0; }
+.log-list {
+  overflow: auto;
+  border-right: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.08));
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
 }
-.log-entry.success .log-level { color: #89d185; }
-.log-entry.error .log-level { color: var(--vscode-errorForeground, #f48771); }
-.log-entry.info .log-level { color: var(--vscode-charts-blue, #9cdcfe); }
+.log-list-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  gap: 2px 8px;
+  padding: 7px 10px;
+  border: none;
+  border-bottom: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.05));
+  background: transparent;
+  color: var(--vscode-foreground);
+  text-align: left;
+  cursor: pointer;
+}
+.log-list-item:hover { background: var(--vscode-list-hoverBackground); }
+.log-list-item.active { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+.log-list-level { grid-column: 1; grid-row: 1; text-transform: uppercase; font-size: 10px; font-weight: 700; }
+.log-list-item.success .log-list-level { color: #89d185; }
+.log-list-item.error .log-list-level { color: var(--vscode-errorForeground, #f48771); }
+.log-list-item.info .log-list-level { color: var(--vscode-charts-blue, #9cdcfe); }
+.log-list-message { grid-column: 2; grid-row: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.log-list-time { grid-column: 2; grid-row: 2; color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; }
+.log-detail {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--vscode-editor-background);
+}
+.log-detail.success { border-left: 3px solid #89d185; }
+.log-detail.error { border-left: 3px solid var(--vscode-errorForeground, #f48771); }
+.log-detail.info { border-left: 3px solid var(--vscode-charts-blue, #9cdcfe); }
+.log-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.08));
+}
+.log-detail-level { text-transform: uppercase; font-weight: 700; }
+.log-detail-time { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family, monospace); }
+.log-detail-message {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--vscode-editor-font-family, monospace);
+  color: var(--vscode-editor-foreground);
+}
 .log-empty { padding: 10px; color: var(--vscode-descriptionForeground); font-style: italic; }
 .datagrid-toast {
   position: fixed;

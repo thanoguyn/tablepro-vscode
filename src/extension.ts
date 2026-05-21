@@ -7,7 +7,6 @@ import { v4 as uuidv4 } from 'uuid';
 import { ConnectionManager } from './core/connection/ConnectionManager';
 import { ConnectionTreeProvider } from './views/sidebar/ConnectionTreeProvider';
 import { SchemaTreeProvider } from './views/sidebar/SchemaTreeProvider';
-import { LogTreeProvider } from './views/sidebar/LogTreeProvider';
 import { Logger, LogEntry } from './core/utils/Logger';
 import { WebviewManager } from './views/webview/WebviewManager';
 import { QueryResultsViewProvider } from './views/webview/QueryResultsViewProvider';
@@ -33,7 +32,6 @@ let connectionManager: ConnectionManager;
 let webviewManager: WebviewManager;
 let connectionTreeProvider: ConnectionTreeProvider;
 let schemaTreeProvider: SchemaTreeProvider;
-let logTreeProvider: LogTreeProvider;
 let schemaProvider: SchemaProvider;
 let queryEngine: QueryEngine;
 let queryHistory: QueryHistory;
@@ -86,7 +84,6 @@ export function activate(context: vscode.ExtensionContext) {
   schemaProvider = new SchemaProvider(connectionManager);
   connectionTreeProvider = new ConnectionTreeProvider(connectionManager);
   schemaTreeProvider = new SchemaTreeProvider(connectionManager);
-  logTreeProvider = new LogTreeProvider();
 
   queryDocContexts = context.workspaceState.get<Record<string, { connectionId: string, connectionName: string, database: string }>>('queryDocContexts', {});
   queryContextStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -112,13 +109,6 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.window.createTreeView('tablepro.schema', {
       treeDataProvider: schemaTreeProvider,
-      showCollapseAll: true,
-    }),
-  );
-
-  context.subscriptions.push(
-    vscode.window.createTreeView('tablepro.logs', {
-      treeDataProvider: logTreeProvider,
       showCollapseAll: true,
     }),
   );

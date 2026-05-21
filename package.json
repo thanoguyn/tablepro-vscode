@@ -74,10 +74,6 @@
         {
           "id": "tablepro.schema",
           "name": "Schema"
-        },
-        {
-          "id": "tablepro.logs",
-          "name": "Logs & Query History"
         }
       ],
       "tablepro-panel": [
@@ -291,16 +287,6 @@
         {
           "command": "tablepro.refreshSchema",
           "when": "view == tablepro.schema",
-          "group": "navigation"
-        },
-        {
-          "command": "tablepro.clearLogs",
-          "when": "view == tablepro.logs",
-          "group": "navigation"
-        },
-        {
-          "command": "tablepro.showLogsOutput",
-          "when": "view == tablepro.logs",
           "group": "navigation"
         }
       ],
