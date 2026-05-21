@@ -5,6 +5,14 @@
   "version": "0.1.0",
   "publisher": "tablepro",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thanoguyn/tablepro-vscode.git"
+  },
+  "homepage": "https://github.com/thanoguyn/tablepro-vscode#readme",
+  "bugs": {
+    "url": "https://github.com/thanoguyn/tablepro-vscode/issues"
+  },
   "engines": {
     "vscode": "^1.95.0"
   },
