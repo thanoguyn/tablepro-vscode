@@ -1,9 +1,9 @@
 {
-  "name": "tablepro",
-  "displayName": "TablePro - Database Client",
+  "name": "tablepro-vscode",
+  "displayName": "TablePro Vscode - Database Client",
   "description": "A fast, feature-rich database client for VSCode. Connect to MySQL, PostgreSQL, SQLite and more.",
   "version": "0.1.0",
-  "publisher": "tablepro",
+  "publisher": "thanoguyn",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -530,7 +530,9 @@
     "lint": "eslint src/ --ext .ts",
     "compile:tests": "tsc -p tsconfig.json",
     "test": "npm run compile:tests && node ./dist/test/runTest.js",
-    "package": "vsce package"
+    "package": "vsce package",
+    "publish": "vsce publish",
+    "deploy": "vsce package && vsce publish"
   },
   "dependencies": {
     "mysql2": "^3.11.0",
