@@ -45,6 +45,18 @@ It is currently an early release (`0.1.0`) focused on MySQL, PostgreSQL, and SQL
 
 For VSIX installation instructions, see [INSTALL_VSIX.md](./INSTALL_VSIX.md).
 
+Quick install from GitHub:
+
+```bash
+curl -L -o /tmp/tablepro-0.1.0.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.0.vsix && code --install-extension /tmp/tablepro-0.1.0.vsix --force
+```
+
+For Agy IDE:
+
+```bash
+curl -L -o /tmp/tablepro-0.1.0.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.0.vsix && agy-ide --install-extension /tmp/tablepro-0.1.0.vsix --force
+```
+
 ## SQLite Files
 
 TablePro registers a custom editor for:

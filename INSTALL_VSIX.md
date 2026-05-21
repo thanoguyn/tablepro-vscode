@@ -38,6 +38,41 @@ code --install-extension /path/to/tablepro-0.1.0.vsix
 
 Then restart or reload VS Code if needed.
 
+## One-Line Download and Install
+
+Install into VS Code:
+
+```bash
+curl -L -o /tmp/tablepro-0.1.0.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.0.vsix && code --install-extension /tmp/tablepro-0.1.0.vsix --force
+```
+
+Install into Agy IDE:
+
+```bash
+curl -L -o /tmp/tablepro-0.1.0.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.0.vsix && agy-ide --install-extension /tmp/tablepro-0.1.0.vsix --force
+```
+
+If your Agy IDE command is different, set it explicitly:
+
+```bash
+IDE_BIN=agy-ide
+curl -L -o /tmp/tablepro-0.1.0.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.0.vsix && "$IDE_BIN" --install-extension /tmp/tablepro-0.1.0.vsix --force
+```
+
+PowerShell:
+
+```powershell
+$vsix = "$env:TEMP\tablepro-0.1.0.vsix"
+Invoke-WebRequest -Uri "https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.0.vsix" -OutFile $vsix
+code --install-extension $vsix --force
+```
+
+For Agy IDE on PowerShell, replace `code` with your Agy IDE CLI command, for example:
+
+```powershell
+agy-ide --install-extension $vsix --force
+```
+
 ## Building the VSIX Locally
 
 From the project root:
