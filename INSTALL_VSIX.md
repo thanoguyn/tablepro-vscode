@@ -8,7 +8,7 @@ This guide explains how to install TablePro from a local `.vsix` package.
 - A TablePro VSIX file, for example:
 
 ```text
-tablepro-0.1.0.vsix
+tablepro-0.1.1.vsix
 ```
 
 ## Option 1: Install from the VS Code UI
@@ -27,13 +27,13 @@ After installation, the TablePro icon should appear in the Activity Bar.
 Run:
 
 ```bash
-code --install-extension tablepro-0.1.0.vsix
+code --install-extension tablepro-0.1.1.vsix
 ```
 
 If the VSIX file is in another folder, pass the full path:
 
 ```bash
-code --install-extension /path/to/tablepro-0.1.0.vsix
+code --install-extension /path/to/tablepro-0.1.1.vsix
 ```
 
 Then restart or reload VS Code if needed.
@@ -43,27 +43,27 @@ Then restart or reload VS Code if needed.
 Install into VS Code:
 
 ```bash
-curl -L -o /tmp/tablepro-0.1.0.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.0.vsix && code --install-extension /tmp/tablepro-0.1.0.vsix --force
+curl -L -o /tmp/tablepro-0.1.1.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.1.vsix && code --install-extension /tmp/tablepro-0.1.1.vsix --force
 ```
 
 Install into Agy IDE:
 
 ```bash
-curl -L -o /tmp/tablepro-0.1.0.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.0.vsix && agy-ide --install-extension /tmp/tablepro-0.1.0.vsix --force
+curl -L -o /tmp/tablepro-0.1.1.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.1.vsix && agy-ide --install-extension /tmp/tablepro-0.1.1.vsix --force
 ```
 
 If your Agy IDE command is different, set it explicitly:
 
 ```bash
 IDE_BIN=agy-ide
-curl -L -o /tmp/tablepro-0.1.0.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.0.vsix && "$IDE_BIN" --install-extension /tmp/tablepro-0.1.0.vsix --force
+curl -L -o /tmp/tablepro-0.1.1.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.1.vsix && "$IDE_BIN" --install-extension /tmp/tablepro-0.1.1.vsix --force
 ```
 
 PowerShell:
 
 ```powershell
-$vsix = "$env:TEMP\tablepro-0.1.0.vsix"
-Invoke-WebRequest -Uri "https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.0.vsix" -OutFile $vsix
+$vsix = "$env:TEMP\tablepro-0.1.1.vsix"
+Invoke-WebRequest -Uri "https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.1.vsix" -OutFile $vsix
 code --install-extension $vsix --force
 ```
 
@@ -93,7 +93,7 @@ The package command creates a `.vsix` file in the project root.
 Install the newer VSIX with the same command:
 
 ```bash
-code --install-extension tablepro-0.1.0.vsix --force
+code --install-extension tablepro-0.1.1.vsix --force
 ```
 
 Reload VS Code after the installation completes.

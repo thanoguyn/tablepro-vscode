@@ -2,7 +2,7 @@
 
 TablePro is a VS Code extension for browsing databases, running SQL, viewing table data, and working with local SQLite files directly inside the editor.
 
-It is currently an early release (`0.1.0`) focused on MySQL, PostgreSQL, and SQLite workflows.
+It is currently an early release (`0.1.1`) focused on MySQL, PostgreSQL, and SQLite workflows.
 
 ## Features
 
@@ -60,13 +60,13 @@ For manual VSIX installation instructions, see [INSTALL_VSIX.md](./INSTALL_VSIX.
 Quick install from GitHub:
 
 ```bash
-curl -L -o /tmp/tablepro-0.1.0.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.0.vsix && code --install-extension /tmp/tablepro-0.1.0.vsix --force
+curl -L -o /tmp/tablepro-0.1.1.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.1.vsix && code --install-extension /tmp/tablepro-0.1.1.vsix --force
 ```
 
 For Agy IDE:
 
 ```bash
-curl -L -o /tmp/tablepro-0.1.0.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.0.vsix && agy-ide --install-extension /tmp/tablepro-0.1.0.vsix --force
+curl -L -o /tmp/tablepro-0.1.1.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.1.vsix && agy-ide --install-extension /tmp/tablepro-0.1.1.vsix --force
 ```
 
 ## SQLite Files

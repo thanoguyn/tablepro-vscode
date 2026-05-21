@@ -6,12 +6,14 @@ import { DatabaseType } from '../../core/types';
 suite('Extension Integration Test Suite', () => {
   vscode.window.showInformationMessage('Start all tests.');
 
+  const extensionId = 'thanoguyn.tablepro-vscode';
+
   test('Extension should be present', () => {
-    assert.ok(vscode.extensions.getExtension('tablepro.tablepro'));
+    assert.ok(vscode.extensions.getExtension(extensionId));
   });
 
   test('Extension should activate', async () => {
-    const ext = vscode.extensions.getExtension('tablepro.tablepro');
+    const ext = vscode.extensions.getExtension(extensionId);
     if (ext) {
       await ext.activate();
       assert.strictEqual(ext.isActive, true);

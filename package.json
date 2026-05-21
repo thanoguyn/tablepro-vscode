@@ -2,7 +2,7 @@
   "name": "tablepro-vscode",
   "displayName": "TablePro Vscode - Database Client",
   "description": "A fast, feature-rich database client for VSCode. Connect to MySQL, PostgreSQL, SQLite and more.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "thanoguyn",
   "license": "MIT",
   "repository": {
@@ -523,7 +523,7 @@
   "scripts": {
     "vscode:prepublish": "npm run build",
     "build": "npm run build:ext && npm run build:webview",
-    "build:ext": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:better-sqlite3 --external:ssh2 --external:sql.js --format=cjs --platform=node --target=node20",
+    "build:ext": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:better-sqlite3 --external:sql.js --external:cpu-features --external:*.node --format=cjs --platform=node --target=node20",
     "build:webview": "cd webview-ui && npm run build",
     "watch": "npm run build:ext -- --watch --sourcemap",
     "dev": "concurrently \"npm run watch\" \"cd webview-ui && npm run dev\"",
