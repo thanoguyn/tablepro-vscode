@@ -16,10 +16,24 @@ interface ColumnHeader {
 
 function formatColumnType(col: ColumnHeader): string {
   const base = (col.rawType || col.type || '').toLowerCase();
+  if (base.includes('(')) return base;
   if (col.maxLength && col.maxLength > 0 && col.maxLength < 65535) return `${base}(${col.maxLength})`;
   if (col.precision && col.scale !== undefined && col.scale !== null) return `${base}(${col.precision},${col.scale})`;
   if (col.precision && col.precision > 0) return `${base}(${col.precision})`;
   return base;
+}
+
+function valueToText(value: unknown): string {
+  if (value === null || value === undefined) return 'NULL';
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+  }
+  const text = String(value);
+  const trimmed = text.trim();
+  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+    try { return JSON.stringify(JSON.parse(trimmed), null, 2); } catch {}
+  }
+  return text;
 }
 
 export default function QuickView() {
@@ -27,6 +41,8 @@ export default function QuickView() {
   const [rowData, setRowData] = useState<unknown[]>([]);
   const [filterText, setFilterText] = useState('');
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const [toast, setToast] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+  const [expandedField, setExpandedField] = useState<{ name: string; type: string; value: string } | null>(null);
 
   useEffect(() => {
     postMessage({ type: 'ready' });
@@ -43,19 +59,37 @@ export default function QuickView() {
     return unsub;
   }, []);
 
-  const handleCopy = (value: unknown, index: number) => {
-    const text = value === null ? 'NULL' : String(value);
-    navigator.clipboard.writeText(text);
-    setCopiedIndex(index);
-    setTimeout(() => setCopiedIndex(null), 1500);
+  const showToast = (kind: 'success' | 'error', text: string) => {
+    setToast({ kind, text });
+    setTimeout(() => setToast(null), 1800);
   };
 
-  const handleCopyAll = (format: 'json' | 'csv' | 'tsv') => {
+  const writeClipboard = async (text: string, successText: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('success', successText);
+      return true;
+    } catch (err) {
+      showToast('error', `Copy failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  };
+
+  const handleCopy = async (value: unknown, index: number) => {
+    const copied = await writeClipboard(valueToText(value), 'Copied value');
+    if (copied) {
+      setCopiedIndex(index);
+      setTimeout(() => setCopiedIndex(null), 1500);
+    }
+  };
+
+  const handleCopyAll = async (format: 'json' | 'csv' | 'tsv') => {
     const cols = columns;
+    let text = '';
     if (format === 'json') {
       const obj: Record<string, unknown> = {};
       cols.forEach((col, i) => { obj[col.name] = rowData[i]; });
-      navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
+      text = JSON.stringify(obj, null, 2);
     } else if (format === 'csv') {
       const header = cols.map(c => c.name).join(',');
       const vals = rowData.map(v => {
@@ -63,10 +97,11 @@ export default function QuickView() {
         const s = String(v);
         return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
       }).join(',');
-      navigator.clipboard.writeText(`${header}\n${vals}`);
+      text = `${header}\n${vals}`;
     } else if (format === 'tsv') {
-      navigator.clipboard.writeText(rowData.map(v => v === null ? 'NULL' : String(v)).join('\t'));
+      text = rowData.map(v => v === null ? 'NULL' : String(v)).join('\t');
     }
+    await writeClipboard(text, `Copied ${format.toUpperCase()}`);
   };
 
   const filteredFields = columns
@@ -118,7 +153,13 @@ export default function QuickView() {
                     {val === null ? (
                       <span className="val-null">NULL</span>
                     ) : (
-                      <span className="val-text" title={String(val)}>{String(val)}</span>
+                      <button
+                        className="val-text"
+                        onClick={() => setExpandedField({ name: col.name, type: formatColumnType(col), value: valueToText(val) })}
+                        title="Click to view full value"
+                      >
+                        {valueToText(val)}
+                      </button>
                     )}
                   </td>
                   <td className="copy-cell">
@@ -136,6 +177,24 @@ export default function QuickView() {
           </table>
         )}
       </div>
+      {toast && <div className={`quickview-toast ${toast.kind}`}>{toast.text}</div>}
+      {expandedField && (
+        <div className="quickview-modal-backdrop" onClick={() => setExpandedField(null)}>
+          <div className="quickview-modal" onClick={e => e.stopPropagation()}>
+            <div className="quickview-modal-header">
+              <div>
+                <strong>{expandedField.name}</strong>
+                <span>{expandedField.type}</span>
+              </div>
+              <button onClick={() => setExpandedField(null)} title="Close">x</button>
+            </div>
+            <pre className="quickview-modal-content">{expandedField.value}</pre>
+            <div className="quickview-modal-actions">
+              <button onClick={() => writeClipboard(expandedField.value, 'Copied full value')}>Copy</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

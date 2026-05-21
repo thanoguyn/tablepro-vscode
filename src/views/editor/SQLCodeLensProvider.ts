@@ -10,7 +10,7 @@ export class SQLCodeLensProvider implements vscode.CodeLensProvider {
 
   private enabled: boolean;
 
-  constructor() {
+  constructor(private readonly getConnectionTitle?: (document: vscode.TextDocument) => string | undefined) {
     this.enabled = vscode.workspace.getConfiguration('tablepro').get('codeLens', true);
 
     vscode.workspace.onDidChangeConfiguration(e => {
@@ -21,12 +21,26 @@ export class SQLCodeLensProvider implements vscode.CodeLensProvider {
     });
   }
 
+  refresh(): void {
+    this._onDidChangeCodeLenses.fire();
+  }
+
   provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
     if (!this.enabled) { return []; }
 
     const lenses: vscode.CodeLens[] = [];
     const text = document.getText();
     const statements = this.findStatements(text);
+    const connectionTitle = this.getConnectionTitle?.(document) || 'Select a connection';
+
+    lenses.push(new vscode.CodeLens(
+      new vscode.Range(0, 0, 0, 0),
+      {
+        title: connectionTitle,
+        command: 'tablepro.changeQueryContext',
+        tooltip: 'Change TablePro query connection',
+      },
+    ));
 
     // Add "Run All" at the top if there are multiple statements
     if (statements.length > 1) {

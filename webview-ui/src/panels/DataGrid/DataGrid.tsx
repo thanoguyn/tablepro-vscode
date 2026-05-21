@@ -54,6 +54,13 @@ interface ContextMenu {
   visIdx: number;
 }
 
+interface GridLogEntry {
+  id: number;
+  time: string;
+  level: 'info' | 'success' | 'error';
+  message: string;
+}
+
 const DEFAULT_PAGE_SIZE = 1000;
 
 function formatColumnType(col: ColumnHeader): string {
@@ -99,9 +106,30 @@ export default function DataGrid() {
   const [tableName, setTableName] = useState<string>('');
   const [filterInput, setFilterInput] = useState('');
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
+  const [copyStatus, setCopyStatus] = useState<{ kind: 'success' | 'error' | 'info'; text: string } | null>(null);
+  const [csvMenuOpen, setCsvMenuOpen] = useState(false);
+  const [logEntries, setLogEntries] = useState<GridLogEntry[]>([]);
+  const [showLogDrawer, setShowLogDrawer] = useState(false);
   const editInputRef = useRef<HTMLInputElement>(null);
+  const csvMenuRef = useRef<HTMLDivElement>(null);
   const hasDeletedRef = useRef(false);
   const quickViewOpenRef = useRef(false);
+
+  function addLog(level: GridLogEntry['level'], message: string) {
+    const entry: GridLogEntry = {
+      id: Date.now() + Math.random(),
+      time: new Date().toLocaleTimeString(),
+      level,
+      message,
+    };
+    setLogEntries(prev => [entry, ...prev].slice(0, 100));
+  }
+
+  function showStatus(kind: 'success' | 'error' | 'info', text: string) {
+    setCopyStatus({ kind, text });
+    addLog(kind === 'info' ? 'info' : kind, text);
+    setTimeout(() => setCopyStatus(null), 1800);
+  }
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -138,6 +166,7 @@ export default function DataGrid() {
         hasDeletedRef.current = false;
         setUndoStack([]);
         setRedoStack([]);
+        addLog('success', `Loaded ${r.rows.length.toLocaleString()} row${r.rows.length === 1 ? '' : 's'} in ${r.executionTime}ms`);
       } else if (msg.type === 'pageData') {
         const r = msg.data as QueryResult;
         const nextPageSize = msg.pageSize || pageSize || DEFAULT_PAGE_SIZE;
@@ -162,10 +191,14 @@ export default function DataGrid() {
         setSelectedRows(new Set());
         setSelectionStart(null);
         setSelectionEnd(null);
+        addLog('success', `Loaded page ${msg.page + 1}: ${r.rows.length.toLocaleString()} row${r.rows.length === 1 ? '' : 's'} in ${r.executionTime}ms`);
       } else if (msg.type === 'totalRowsCount') {
         setTotalRows(msg.data.totalRows);
+        addLog('info', `Counted ${Number(msg.data.totalRows).toLocaleString()} total row${msg.data.totalRows === 1 ? '' : 's'}`);
       } else if (msg.type === 'rowSelected') {
         // Quick View auto-updated by extension, no local state change needed
+      } else if (msg.type === 'copyResult') {
+        showStatus(msg.success ? 'success' : 'error', msg.message || (msg.success ? 'Copied' : 'Copy failed'));
       }
     });
     return unsub;
@@ -178,11 +211,19 @@ export default function DataGrid() {
     }
   }, [editingCell]);
 
-  // Close context menu on outside click
+  // Close menus on outside pointer interactions, even when table cells stop click bubbling.
   useEffect(() => {
-    const handleClick = () => setContextMenu(null);
-    window.addEventListener('click', handleClick);
-    return () => window.removeEventListener('click', handleClick);
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Element | null;
+      if (!target?.closest('.context-menu')) {
+        setContextMenu(null);
+      }
+      if (csvMenuRef.current && !csvMenuRef.current.contains(event.target as Node)) {
+        setCsvMenuOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', handlePointerDown, true);
+    return () => window.removeEventListener('pointerdown', handlePointerDown, true);
   }, []);
 
   const hasChanges = rows.some(r => r.status !== 'unchanged');
@@ -721,6 +762,36 @@ export default function DataGrid() {
     return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
   }, []);
 
+  const writeClipboard = useCallback(async (text: string, successText: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      showStatus('success', successText);
+      return true;
+    } catch (err) {
+      showStatus('error', `Copy failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }, []);
+
+  const getAllClientRowsForCopy = useCallback(() => {
+    if (filteredSortedIndices !== null) {
+      return filteredSortedIndices
+        .map(origIdx => rows[origIdx])
+        .filter(row => row && row.status !== 'deleted')
+        .map((row, origIdx) => ({ row, origIdx }));
+    }
+    return rows
+      .map((row, origIdx) => ({ row, origIdx }))
+      .filter(item => item.row.status !== 'deleted');
+  }, [filteredSortedIndices, rows]);
+
+  const buildCsv = useCallback((items: { row: RowState; origIdx: number }[], includeHeader: boolean) => {
+    if (!result) return '';
+    const header = result.columns.map(c => formatDelimitedCell(c.name, ',')).join(',');
+    const body = items.map(x => x.row.data.map(v => formatDelimitedCell(v, ',')).join(',')).join('\n');
+    return includeHeader ? `${header}\n${body}` : body;
+  }, [result, formatDelimitedCell]);
+
   const copyRowAs = useCallback((format: CopyFormat, visIdx: number) => {
     if (!result) return;
     const item = pageRows[visIdx];
@@ -766,19 +837,30 @@ export default function DataGrid() {
       }).join(' AND ');
       output = `UPDATE ${tableName} SET ${sets} WHERE ${where};`;
     }
-    navigator.clipboard.writeText(output);
-  }, [result, pageRows, tableName, formatDelimitedCell]);
+    void writeClipboard(output, `Copied ${format.toUpperCase()}`);
+  }, [result, pageRows, tableName, formatDelimitedCell, writeClipboard]);
 
-  const handleCopyCSV = useCallback((includeHeader = true) => {
+  const handleCopyCSV = useCallback((includeHeader = true, scope: 'page' | 'all' = 'page') => {
     if (!result) return;
-    const header = result.columns.map(c => formatDelimitedCell(c.name, ',')).join(',');
-    const body = pageRows.map(x => x.row.data.map(v => {
-      if (v === null) return '';
-      const s = String(v);
-      return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
-    }).join(',')).join('\n');
-    navigator.clipboard.writeText(includeHeader ? `${header}\n${body}` : body);
-  }, [result, pageRows, formatDelimitedCell]);
+    setCsvMenuOpen(false);
+    if (scope === 'all' && tableName) {
+      showStatus('info', 'Copy all CSV started...');
+      postMessage({
+        type: 'copyTableData',
+        data: {
+          format: 'csv',
+          includeHeader,
+          sortStates,
+          whereFilter: whereFilter || undefined,
+        },
+      });
+      return;
+    }
+
+    const items = scope === 'all' ? getAllClientRowsForCopy() : pageRows;
+    const text = buildCsv(items, includeHeader);
+    void writeClipboard(text, scope === 'all' ? 'Copied all rows as CSV' : 'Copied current page as CSV');
+  }, [result, tableName, sortStates, whereFilter, getAllClientRowsForCopy, pageRows, buildCsv, writeClipboard]);
 
   // ── Quick View ──
   const handleQuickView = useCallback((visIdx: number) => {
@@ -884,10 +966,10 @@ export default function DataGrid() {
                 }
                 lines.push(rowCells.join('\t'));
               }
-              navigator.clipboard.writeText(lines.join('\n'));
+              void writeClipboard(lines.join('\n'), 'Copied selection');
             } else {
               const v = pageRows[selectedRow]?.row.data[selectedCol];
-              navigator.clipboard.writeText(v === null ? '' : String(v));
+              void writeClipboard(v === null ? '' : String(v), 'Copied cell');
             }
             e.preventDefault();
           }
@@ -900,10 +982,12 @@ export default function DataGrid() {
         }
         break;
     }
-  }, [editingCell, result, selectedRow, selectedCol, pageRows, startEdit, commitEdit, cancelEdit, undo, redo, pushUndo, selectionStart, selectionEnd, pasteData, handleReload]);
+  }, [editingCell, result, selectedRow, selectedCol, pageRows, startEdit, commitEdit, cancelEdit, undo, redo, pushUndo, selectionStart, selectionEnd, pasteData, handleReload, writeClipboard]);
 
   if (!result) return <div className="datagrid-empty"><div className="empty-icon">📊</div><h3>No Results</h3><p className="text-muted">Run a query to see results here</p></div>;
   if (result.columns.length === 0) return <div className="datagrid-message"><div className="message-icon">✅</div><h3>{result.affectedRows} rows affected</h3><p className="text-muted">{result.executionTime}ms</p></div>;
+
+  const latestLog = logEntries[0];
 
   return (
     <div className="datagrid" onKeyDown={handleKeyDown} tabIndex={0}>
@@ -942,8 +1026,17 @@ export default function DataGrid() {
             <button className="toolbar-btn btn-quickview" onClick={() => handleQuickView(selectedRow)} title="Quick View Row">👁 Quick View</button>
           )}
           <button className="toolbar-btn" onClick={addRow} title="Add Row">＋ Row</button>
-          <button className="toolbar-btn" onClick={() => handleCopyCSV(true)} title="Copy visible as CSV with header">📋 CSV</button>
-          <button className="toolbar-btn" onClick={() => handleCopyCSV(false)} title="Copy visible as CSV without header">CSV−H</button>
+          <div className="csv-copy-group" ref={csvMenuRef}>
+            <button className="toolbar-btn csv-main-btn" onClick={() => handleCopyCSV(true, 'page')} title="Copy current page as CSV with header">📋 CSV</button>
+            <button className="toolbar-btn csv-menu-btn" onClick={() => setCsvMenuOpen(v => !v)} title="More CSV copy options">▾</button>
+            {csvMenuOpen && (
+              <div className="csv-copy-menu">
+                <button onClick={() => handleCopyCSV(false, 'page')}>Current page, no header</button>
+                <button onClick={() => handleCopyCSV(true, 'all')}>All rows with header</button>
+                <button onClick={() => handleCopyCSV(false, 'all')}>All rows, no header</button>
+              </div>
+            )}
+          </div>
           <button className="toolbar-btn" onClick={() => postMessage({ type: 'openNewTab' })} title="Open New Query Tab">＋ Tab</button>
           <button className="toolbar-btn" onClick={undo} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">↩</button>
           <button className="toolbar-btn" onClick={redo} disabled={redoStack.length === 0} title="Redo (Ctrl+Shift+Z)">↪</button>
@@ -1070,6 +1163,25 @@ export default function DataGrid() {
             onClick={() => handlePageChange(page + 1)}>⟩</button>
         </div>
       )}
+      <button className={`datagrid-log-strip ${latestLog?.level || 'info'}`} onClick={() => setShowLogDrawer(v => !v)} title="Toggle logs">
+        <span className="log-toggle">{showLogDrawer ? '▾' : '▸'}</span>
+        <span className="log-time">{latestLog?.time || '--:--:--'}</span>
+        <span className="log-message">{latestLog?.message || 'No logs yet'}</span>
+      </button>
+      {showLogDrawer && (
+        <div className="datagrid-log-drawer">
+          {logEntries.length === 0 ? (
+            <div className="log-empty">No logs yet</div>
+          ) : logEntries.map(entry => (
+            <div key={entry.id} className={`log-entry ${entry.level}`}>
+              <span className="log-time">{entry.time}</span>
+              <span className="log-level">{entry.level}</span>
+              <span className="log-message">{entry.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {copyStatus && <div className={`datagrid-toast ${copyStatus.kind}`}>{copyStatus.text}</div>}
     </div>
   );
 }

@@ -256,8 +256,9 @@ export type WebviewMessage =
   | { type: 'ready' }
   | { type: 'openQuickView'; data: { columns: any[]; rowData: any[] } }
   | { type: 'rowSelected'; data: { columns: any[]; rowData: any[] } }
-  | { type: 'countRows' }
-  | { type: 'fetchPage'; data: { page: number; sortColumn?: string; sortDirection?: 'asc' | 'desc' } };
+  | { type: 'countRows'; data?: { whereFilter?: string } }
+  | { type: 'copyTableData'; data: { format: 'csv'; includeHeader?: boolean; sortStates?: any[]; whereFilter?: string } }
+  | { type: 'fetchPage'; data: { page: number; sortColumn?: string; sortDirection?: 'asc' | 'desc'; sortStates?: any[]; whereFilter?: string } };
 
 export interface SortConfig {
   column: string;

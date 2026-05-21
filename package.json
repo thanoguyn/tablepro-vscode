@@ -26,7 +26,8 @@
   ],
   "activationEvents": [
     "onLanguage:sql",
-    "onCustomEditor:tablepro.sqliteViewer"
+    "onCustomEditor:tablepro.sqliteViewer",
+    "onStartupFinished"
   ],
   "main": "./dist/extension.js",
   "contributes": {
