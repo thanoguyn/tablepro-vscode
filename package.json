@@ -1,0 +1,530 @@
+{
+  "name": "tablepro",
+  "displayName": "TablePro - Database Client",
+  "description": "A fast, feature-rich database client for VSCode. Connect to MySQL, PostgreSQL, SQLite and more.",
+  "version": "0.1.0",
+  "publisher": "tablepro",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other",
+    "Data Science",
+    "Visualization"
+  ],
+  "keywords": [
+    "database",
+    "sql",
+    "mysql",
+    "postgresql",
+    "sqlite",
+    "redis",
+    "mongodb",
+    "query",
+    "data"
+  ],
+  "activationEvents": [
+    "onLanguage:sql",
+    "onCustomEditor:tablepro.sqliteViewer"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "tablepro.sqliteViewer",
+        "displayName": "TablePro SQLite Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.db"
+          },
+          {
+            "filenamePattern": "*.sqlite"
+          },
+          {
+            "filenamePattern": "*.sqlite3"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tablepro",
+          "title": "TablePro",
+          "icon": "media/database.svg"
+        }
+      ],
+      "panel": [
+        {
+          "id": "tablepro-panel",
+          "title": "TablePro Query Results",
+          "icon": "media/database.svg"
+        }
+      ]
+    },
+    "views": {
+      "tablepro": [
+        {
+          "id": "tablepro.connections",
+          "name": "Connections"
+        },
+        {
+          "id": "tablepro.schema",
+          "name": "Schema"
+        },
+        {
+          "id": "tablepro.logs",
+          "name": "Logs & Query History"
+        }
+      ],
+      "tablepro-panel": [
+        {
+          "type": "webview",
+          "id": "tablepro.queryResultsView",
+          "name": "Query Results"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "tablepro.connections",
+        "contents": "No connections yet.\n[Create Connection](command:tablepro.newConnection)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "tablepro.newConnection",
+        "title": "New Connection",
+        "category": "TablePro",
+        "icon": "$(add)"
+      },
+      {
+        "command": "tablepro.editConnection",
+        "title": "Edit Connection",
+        "category": "TablePro",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "tablepro.deleteConnection",
+        "title": "Delete Connection",
+        "category": "TablePro",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "tablepro.connect",
+        "title": "Connect",
+        "category": "TablePro",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "tablepro.disconnect",
+        "title": "Disconnect",
+        "category": "TablePro",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "tablepro.testConnection",
+        "title": "Test Connection",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.newQuery",
+        "title": "New Query",
+        "category": "TablePro",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "tablepro.saveQuery",
+        "title": "Save Query",
+        "category": "TablePro",
+        "icon": "$(save)"
+      },
+      {
+        "command": "tablepro.toggleQueryAutoSave",
+        "title": "Toggle Query Auto Save",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.changeQueryContext",
+        "title": "Change Query Database Context",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.runQuery",
+        "title": "Run Query",
+        "category": "TablePro",
+        "icon": "$(play)"
+      },
+      {
+        "command": "tablepro.runAllQueries",
+        "title": "Run All Statements",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.cancelQuery",
+        "title": "Cancel Query",
+        "category": "TablePro",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "tablepro.formatSQL",
+        "title": "Format SQL",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.queryHistory",
+        "title": "Query History",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.openTable",
+        "title": "Open Table Data",
+        "category": "TablePro",
+        "icon": "$(table)"
+      },
+      {
+        "command": "tablepro.openStructure",
+        "title": "Open Table Structure",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.showDDL",
+        "title": "Show DDL",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.switchDatabase",
+        "title": "Switch Database",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.refreshConnections",
+        "title": "Refresh",
+        "category": "TablePro",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "tablepro.refreshSchema",
+        "title": "Refresh Schema",
+        "category": "TablePro",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "tablepro.runStatementAt",
+        "title": "Run Statement",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.truncateTable",
+        "title": "Truncate Table",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.dropTable",
+        "title": "Drop Table",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.quickSwitcher",
+        "title": "Quick Table Switcher",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.erDiagram",
+        "title": "Open ER Diagram",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.exportData",
+        "title": "Export Table Data",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.importData",
+        "title": "Import Data to Table",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.explainPlan",
+        "title": "Explain Query Plan",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.openTerminal",
+        "title": "Open Terminal CLI",
+        "category": "TablePro",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "tablepro.clearLogs",
+        "title": "Clear Logs",
+        "category": "TablePro",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "tablepro.showLogsOutput",
+        "title": "Show Log Output",
+        "category": "TablePro",
+        "icon": "$(output)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "tablepro.newConnection",
+          "when": "view == tablepro.connections",
+          "group": "navigation"
+        },
+        {
+          "command": "tablepro.refreshConnections",
+          "when": "view == tablepro.connections",
+          "group": "navigation"
+        },
+        {
+          "command": "tablepro.newQuery",
+          "when": "view == tablepro.connections && tablepro.hasActiveConnection",
+          "group": "navigation"
+        },
+        {
+          "command": "tablepro.refreshSchema",
+          "when": "view == tablepro.schema",
+          "group": "navigation"
+        },
+        {
+          "command": "tablepro.clearLogs",
+          "when": "view == tablepro.logs",
+          "group": "navigation"
+        },
+        {
+          "command": "tablepro.showLogsOutput",
+          "when": "view == tablepro.logs",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "tablepro.connect",
+          "when": "view == tablepro.connections && viewItem == connection-disconnected",
+          "group": "inline"
+        },
+        {
+          "command": "tablepro.disconnect",
+          "when": "view == tablepro.connections && viewItem == connection-connected",
+          "group": "inline"
+        },
+        {
+          "command": "tablepro.editConnection",
+          "when": "view == tablepro.connections && viewItem =~ /^connection/",
+          "group": "1_manage@1"
+        },
+        {
+          "command": "tablepro.newQuery",
+          "when": "view == tablepro.connections && viewItem == connection-connected",
+          "group": "2_query@1"
+        },
+        {
+          "command": "tablepro.erDiagram",
+          "when": "view == tablepro.connections && viewItem == connection-connected",
+          "group": "2_query@2"
+        },
+        {
+          "command": "tablepro.openTerminal",
+          "when": "view == tablepro.connections && viewItem == connection-connected",
+          "group": "2_query@3"
+        },
+        {
+          "command": "tablepro.deleteConnection",
+          "when": "view == tablepro.connections && viewItem =~ /^connection/",
+          "group": "3_danger@1"
+        },
+        {
+          "command": "tablepro.openTable",
+          "when": "view == tablepro.schema && viewItem == table",
+          "group": "inline"
+        },
+        {
+          "command": "tablepro.openStructure",
+          "when": "view == tablepro.schema && viewItem == table",
+          "group": "1_view@1"
+        },
+        {
+          "command": "tablepro.showDDL",
+          "when": "view == tablepro.schema && viewItem == table",
+          "group": "1_view@2"
+        },
+        {
+          "command": "tablepro.exportData",
+          "when": "view == tablepro.schema && viewItem == table",
+          "group": "2_actions@1"
+        },
+        {
+          "command": "tablepro.importData",
+          "when": "view == tablepro.schema && viewItem == table",
+          "group": "2_actions@2"
+        },
+        {
+          "command": "tablepro.truncateTable",
+          "when": "view == tablepro.schema && viewItem == table",
+          "group": "3_danger@1"
+        },
+        {
+          "command": "tablepro.dropTable",
+          "when": "view == tablepro.schema && viewItem == table",
+          "group": "3_danger@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "tablepro.runQuery",
+          "when": "resourceLangId == sql",
+          "group": "navigation@1"
+        },
+        {
+          "command": "tablepro.saveQuery",
+          "when": "resourceLangId == sql",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "tablepro.explainPlan",
+          "when": "resourceLangId == sql",
+          "group": "tablepro@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "tablepro.runQuery",
+        "key": "cmd+enter",
+        "mac": "cmd+enter",
+        "when": "resourceLangId == sql"
+      },
+      {
+        "command": "tablepro.runAllQueries",
+        "key": "cmd+shift+enter",
+        "mac": "cmd+shift+enter",
+        "when": "resourceLangId == sql"
+      },
+      {
+        "command": "tablepro.cancelQuery",
+        "key": "cmd+.",
+        "mac": "cmd+.",
+        "when": "tablepro.queryRunning"
+      },
+      {
+        "command": "tablepro.formatSQL",
+        "key": "cmd+shift+l",
+        "mac": "cmd+shift+l",
+        "when": "resourceLangId == sql"
+      },
+      {
+        "command": "tablepro.queryHistory",
+        "key": "cmd+shift+h",
+        "mac": "cmd+shift+h"
+      },
+      {
+        "command": "tablepro.newQuery",
+        "key": "ctrl+t",
+        "mac": "ctrl+t",
+        "when": "tablepro.hasActiveConnection"
+      },
+      {
+        "command": "tablepro.newConnection",
+        "key": "cmd+n",
+        "mac": "cmd+n",
+        "when": "focusedView == tablepro.connections"
+      },
+      {
+        "command": "tablepro.quickSwitcher",
+        "key": "cmd+option+t",
+        "mac": "cmd+option+t",
+        "when": "tablepro.hasActiveConnection"
+      }
+    ],
+    "configuration": {
+      "title": "TablePro",
+      "properties": {
+        "tablepro.defaultRowsPerPage": {
+          "type": "number",
+          "default": 1000,
+          "description": "Default number of rows per page in the data grid"
+        },
+        "tablepro.autoSaveQueries": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-save SQL query documents before running them"
+        },
+        "tablepro.queryTimeout": {
+          "type": "number",
+          "default": 30,
+          "description": "Query timeout in seconds (0 = no timeout)"
+        },
+        "tablepro.autoUppercaseKeywords": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-uppercase SQL keywords while typing"
+        },
+        "tablepro.safeMode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Require confirmation before executing write queries"
+        },
+        "tablepro.maxReconnectAttempts": {
+          "type": "number",
+          "default": 3,
+          "description": "Maximum reconnect attempts on connection loss"
+        },
+        "tablepro.idleTimeout": {
+          "type": "number",
+          "default": 300,
+          "description": "Idle connection timeout in seconds (0 = never)"
+        },
+        "tablepro.codeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Run buttons above SQL statements"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "npm run build:ext && npm run build:webview",
+    "build:ext": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:better-sqlite3 --external:ssh2 --external:sql.js --format=cjs --platform=node --target=node20",
+    "build:webview": "cd webview-ui && npm run build",
+    "watch": "npm run build:ext -- --watch --sourcemap",
+    "dev": "concurrently \"npm run watch\" \"cd webview-ui && npm run dev\"",
+    "lint": "eslint src/ --ext .ts",
+    "compile:tests": "tsc -p tsconfig.json",
+    "test": "npm run compile:tests && node ./dist/test/runTest.js",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "mysql2": "^3.11.0",
+    "pg": "^8.13.0",
+    "sql-formatter": "^15.4.0",
+    "sql.js": "^1.14.1",
+    "ssh2": "^1.16.0",
+    "uuid": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "@types/ssh2": "^1.15.0",
+    "@types/uuid": "^10.0.0",
+    "@types/vscode": "^1.95.0",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^3.0.0",
+    "concurrently": "^9.0.0",
+    "esbuild": "^0.24.0",
+    "eslint": "^9.0.0",
+    "glob": "^10.3.12",
+    "mocha": "^10.4.0",
+    "typescript": "^5.6.0"
+  }
+}

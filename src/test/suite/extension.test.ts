@@ -1,0 +1,48 @@
+import * as assert from 'assert';
+import * as vscode from 'vscode';
+import { DriverFactory } from '../../core/drivers';
+import { DatabaseType } from '../../core/types';
+
+suite('Extension Integration Test Suite', () => {
+  vscode.window.showInformationMessage('Start all tests.');
+
+  test('Extension should be present', () => {
+    assert.ok(vscode.extensions.getExtension('tablepro.tablepro'));
+  });
+
+  test('Extension should activate', async () => {
+    const ext = vscode.extensions.getExtension('tablepro.tablepro');
+    if (ext) {
+      await ext.activate();
+      assert.strictEqual(ext.isActive, true);
+    } else {
+      assert.fail('Extension not found');
+    }
+  });
+
+  test('Extension commands should be registered', async () => {
+    const commands = await vscode.commands.getCommands(true);
+    const expectedCommands = [
+      'tablepro.newConnection',
+      'tablepro.openTerminal',
+      'tablepro.runQuery',
+      'tablepro.runAllQueries',
+      'tablepro.cancelQuery',
+    ];
+
+    for (const cmd of expectedCommands) {
+      assert.ok(commands.includes(cmd), `Command ${cmd} should be registered`);
+    }
+  });
+
+  test('DriverFactory should resolve basic drivers', () => {
+    const sqliteDriver = DriverFactory.createDriver(DatabaseType.SQLite);
+    assert.strictEqual(sqliteDriver.driverType, 'sqlite');
+
+    const mysqlDriver = DriverFactory.createDriver(DatabaseType.MySQL);
+    assert.strictEqual(mysqlDriver.driverType, 'mysql');
+
+    const pgDriver = DriverFactory.createDriver(DatabaseType.PostgreSQL);
+    assert.strictEqual(pgDriver.driverType, 'postgresql');
+  });
+});

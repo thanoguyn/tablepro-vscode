@@ -1,0 +1,2132 @@
+import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import { glob } from 'glob';
+import { v4 as uuidv4 } from 'uuid';
+import { ConnectionManager } from './core/connection/ConnectionManager';
+import { ConnectionTreeProvider } from './views/sidebar/ConnectionTreeProvider';
+import { SchemaTreeProvider } from './views/sidebar/SchemaTreeProvider';
+import { LogTreeProvider } from './views/sidebar/LogTreeProvider';
+import { Logger, LogEntry } from './core/utils/Logger';
+import { WebviewManager } from './views/webview/WebviewManager';
+import { QueryResultsViewProvider } from './views/webview/QueryResultsViewProvider';
+import { SchemaProvider } from './core/schema/SchemaProvider';
+import { QueryEngine } from './core/query/QueryEngine';
+import { QueryHistory } from './core/query/QueryHistory';
+import { SQLCompletionProvider } from './views/editor/SQLCompletionProvider';
+import { SQLHoverProvider } from './views/editor/SQLHoverProvider';
+import { SQLCodeLensProvider } from './views/editor/SQLCodeLensProvider';
+import {
+  ConnectionConfig,
+  DatabaseType,
+  DATABASE_TYPE_META,
+  WebviewMessage,
+  QueryResult,
+  createDefaultConnectionConfig,
+  SSLMode,
+} from './core/types';
+import { DriverFactory } from './core/drivers';
+import { ImportExportService } from './core/utils/ImportExportService';
+
+let connectionManager: ConnectionManager;
+let webviewManager: WebviewManager;
+let connectionTreeProvider: ConnectionTreeProvider;
+let schemaTreeProvider: SchemaTreeProvider;
+let logTreeProvider: LogTreeProvider;
+let schemaProvider: SchemaProvider;
+let queryEngine: QueryEngine;
+let queryHistory: QueryHistory;
+let queryResultsViewProvider: QueryResultsViewProvider;
+let queryDocContexts: Record<string, { connectionId: string, connectionName: string, database: string }> = {};
+let queryContextStatusBarItem: vscode.StatusBarItem;
+let extensionContext: vscode.ExtensionContext;
+
+async function getCurrentDatabaseName(connectionId: string): Promise<string> {
+  const activeConn = connectionManager.getActiveConnection(connectionId);
+  if (!activeConn) return '';
+  try {
+    return await activeConn.driver.getCurrentDatabase();
+  } catch {
+    return activeConn.config.database || '';
+  }
+}
+
+export function activate(context: vscode.ExtensionContext) {
+  extensionContext = context;
+  console.log('TablePro extension activated');
+
+  // Initialize core services
+  connectionManager = new ConnectionManager(context);
+  webviewManager = new WebviewManager(context);
+  queryHistory = new QueryHistory(context);
+  queryEngine = new QueryEngine(connectionManager, queryHistory);
+  queryResultsViewProvider = new QueryResultsViewProvider(context, async (message: WebviewMessage) => {
+    if (message.type === 'openQuickView') {
+      openQuickViewPanel(message.data.columns, message.data.rowData);
+    }
+    if (message.type === 'rowSelected') {
+      webviewManager.postMessage('tablepro-quick-view', {
+        type: 'rowSelected',
+        data: message.data
+      });
+    }
+    if ((message as any).type === 'openNewTab') {
+      vscode.commands.executeCommand('tablepro.newQuery');
+    }
+  });
+
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      QueryResultsViewProvider.viewType,
+      queryResultsViewProvider
+    )
+  );
+  schemaProvider = new SchemaProvider(connectionManager);
+  connectionTreeProvider = new ConnectionTreeProvider(connectionManager);
+  schemaTreeProvider = new SchemaTreeProvider(connectionManager);
+  logTreeProvider = new LogTreeProvider();
+
+  queryDocContexts = context.workspaceState.get<Record<string, { connectionId: string, connectionName: string, database: string }>>('queryDocContexts', {});
+  queryContextStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  context.subscriptions.push(queryContextStatusBarItem);
+
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(() => updateStatusBar()),
+    connectionManager.onActiveConnectionChanged(() => updateStatusBar()),
+    connectionManager.onConnectionChanged(() => updateStatusBar())
+  );
+
+  updateStatusBar();
+
+  // ── Tree Views ──
+
+  context.subscriptions.push(
+    vscode.window.createTreeView('tablepro.connections', {
+      treeDataProvider: connectionTreeProvider,
+      showCollapseAll: true,
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.window.createTreeView('tablepro.schema', {
+      treeDataProvider: schemaTreeProvider,
+      showCollapseAll: true,
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.window.createTreeView('tablepro.logs', {
+      treeDataProvider: logTreeProvider,
+      showCollapseAll: true,
+    }),
+  );
+
+  // ── Language Features (Phase 2) ──
+
+  const sqlSelector: vscode.DocumentSelector = { language: 'sql' };
+
+  context.subscriptions.push(
+    vscode.languages.registerCompletionItemProvider(
+      sqlSelector,
+      new SQLCompletionProvider(schemaProvider),
+      '.', ' ', '\n',
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.languages.registerHoverProvider(
+      sqlSelector,
+      new SQLHoverProvider(schemaProvider),
+    ),
+  );
+
+  const codeLensProvider = new SQLCodeLensProvider();
+  context.subscriptions.push(
+    vscode.languages.registerCodeLensProvider(sqlSelector, codeLensProvider),
+  );
+
+  // ── Logging Commands ──
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.clearLogs', () => {
+      Logger.getInstance().clear();
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.showLogsOutput', () => {
+      Logger.getInstance().showOutput();
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.showLogItem', async (log: LogEntry) => {
+      if (log.type === 'sql') {
+        const doc = await vscode.workspace.openTextDocument({
+          content: log.message,
+          language: 'sql'
+        });
+        await vscode.window.showTextDocument(doc);
+      } else if (log.details) {
+        const doc = await vscode.workspace.openTextDocument({
+          content: `${log.message}\n\n${log.details}`,
+          language: 'text'
+        });
+        await vscode.window.showTextDocument(doc);
+      } else {
+        vscode.window.showInformationMessage(log.message);
+      }
+    }),
+  );
+
+  // ── Connection Commands ──
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.newConnection', async () => {
+      const dbTypes = DriverFactory.getSupportedTypes();
+      const items = dbTypes.map(type => ({
+        label: DATABASE_TYPE_META[type]?.label || type,
+        description: `Port ${DATABASE_TYPE_META[type]?.defaultPort || ''}`,
+        type,
+      }));
+
+      const selected = await vscode.window.showQuickPick(items, {
+        placeHolder: 'Select database type',
+        title: 'New Connection',
+      });
+
+      if (!selected) { return; }
+      const config = createDefaultConnectionConfig(selected.type);
+      openConnectionForm(config);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.editConnection', async (item?: any) => {
+      const id = item?.config?.id || item;
+      if (!id) { return; }
+      const configs = await connectionManager.getSavedConnections();
+      const config = configs.find(c => c.id === id);
+      if (config) { openConnectionForm(config); }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.deleteConnection', async (item?: any) => {
+      const id = item?.config?.id || item;
+      if (!id) { return; }
+      const configs = await connectionManager.getSavedConnections();
+      const config = configs.find(c => c.id === id);
+      if (!config) { return; }
+
+      const confirm = await vscode.window.showWarningMessage(
+        `Delete connection "${config.name || 'Untitled'}"?`,
+        { modal: true },
+        'Delete',
+      );
+      if (confirm === 'Delete') {
+        await connectionManager.deleteConnection(id);
+        vscode.window.showInformationMessage('Connection deleted.');
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.connect', async (idOrItem?: any) => {
+      const id = typeof idOrItem === 'string' ? idOrItem : idOrItem?.config?.id;
+      if (!id) { return; }
+
+      try {
+        await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: 'Connecting...', cancellable: false },
+          () => connectionManager.connect(id),
+        );
+
+        const config = (await connectionManager.getSavedConnections()).find(c => c.id === id);
+        vscode.window.showInformationMessage(`Connected to ${config?.name || 'database'}`);
+        schemaTreeProvider.clearCache();
+        schemaTreeProvider.refresh();
+        schemaProvider.refresh();
+      } catch (err) {
+        vscode.window.showErrorMessage(`Connection failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.disconnect', async (item?: any) => {
+      const id = item?.config?.id || connectionManager.activeConnectionId;
+      if (!id) { return; }
+      await connectionManager.disconnect(id);
+      vscode.window.showInformationMessage('Disconnected.');
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.testConnection', async (config?: ConnectionConfig) => {
+      if (!config) { return; }
+      const result = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Testing connection...', cancellable: false },
+        () => connectionManager.testConnection(config),
+      );
+      if (result.success) {
+        vscode.window.showInformationMessage(`✅ ${result.message}`);
+      } else {
+        vscode.window.showErrorMessage(`❌ ${result.message}`);
+      }
+    }),
+  );
+
+  // ── Query Commands ──
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.newQuery', async (item?: any) => {
+      const requestedConnId = item?.config?.id || item?.id || item?.connectionId;
+      const activeConnId = requestedConnId || connectionManager.activeConnectionId;
+      if (!activeConnId) {
+        vscode.window.showWarningMessage('No active connection. Connect to a database first.');
+        return;
+      }
+      if (!connectionManager.isConnected(activeConnId)) {
+        vscode.window.showWarningMessage('Selected connection is not active. Connect to a database first.');
+        return;
+      }
+
+      if (connectionManager.activeConnectionId !== activeConnId) {
+        connectionManager.setActiveConnection(activeConnId);
+      }
+
+      const conn = connectionManager.getActiveConnection(activeConnId);
+      const connName = conn?.config.name || 'Connected';
+      const requestedDb = typeof item?.database === 'string' ? item.database : undefined;
+      const db = requestedDb || await getCurrentDatabaseName(activeConnId);
+
+      const doc = await vscode.workspace.openTextDocument({ language: 'sql', content: '-- New Query\n' });
+      const uri = doc.uri.toString();
+
+      queryDocContexts[uri] = {
+        connectionId: activeConnId,
+        connectionName: connName,
+        database: db
+      };
+      await context.workspaceState.update('queryDocContexts', queryDocContexts);
+
+      await vscode.window.showTextDocument(doc);
+      updateStatusBar();
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.runQuery', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) { return; }
+
+      try {
+        await applyQueryContext(editor.document);
+      } catch (err) {
+        vscode.window.showErrorMessage(String(err));
+        return;
+      }
+
+      if (!connectionManager.activeConnectionId) {
+        vscode.window.showWarningMessage('No active connection. Connect to a database first.');
+        return;
+      }
+
+      const config = vscode.workspace.getConfiguration('tablepro');
+      if (config.get<boolean>('autoSaveQueries', false) && editor.document.isDirty) {
+        await editor.document.save();
+      }
+
+      let sql: string;
+      if (!editor.selection.isEmpty) {
+        sql = editor.document.getText(editor.selection);
+      } else {
+        sql = getCurrentStatement(editor);
+      }
+
+      sql = sql.trim();
+      if (!sql) { return; }
+
+      await executeAndShowResults(sql);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.runAllQueries', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) { return; }
+
+      try {
+        await applyQueryContext(editor.document);
+      } catch (err) {
+        vscode.window.showErrorMessage(String(err));
+        return;
+      }
+
+      if (!connectionManager.activeConnectionId) { return; }
+
+      const config = vscode.workspace.getConfiguration('tablepro');
+      if (config.get<boolean>('autoSaveQueries', false) && editor.document.isDirty) {
+        await editor.document.save();
+      }
+
+      const sql = editor.document.getText().trim();
+      if (!sql) { return; }
+
+      await executeAndShowResults(sql);
+    }),
+  );
+
+  // Run a specific statement identified by character offset (from CodeLens)
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.runStatementAt', async (startOffset: number, endOffset: number) => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) { return; }
+
+      try {
+        await applyQueryContext(editor.document);
+      } catch (err) {
+        vscode.window.showErrorMessage(String(err));
+        return;
+      }
+
+      if (!connectionManager.activeConnectionId) { return; }
+
+      const config = vscode.workspace.getConfiguration('tablepro');
+      if (config.get<boolean>('autoSaveQueries', false) && editor.document.isDirty) {
+        await editor.document.save();
+      }
+
+      const sql = editor.document.getText().substring(startOffset, endOffset + 1).trim();
+      if (!sql) { return; }
+
+      // Remove trailing semicolon for execution
+      const cleanSql = sql.endsWith(';') ? sql.slice(0, -1).trim() : sql;
+      await executeAndShowResults(cleanSql);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.saveQuery', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (editor) {
+        await editor.document.save();
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.toggleQueryAutoSave', async () => {
+      const config = vscode.workspace.getConfiguration('tablepro');
+      const current = config.get<boolean>('autoSaveQueries', false);
+      await config.update('autoSaveQueries', !current, vscode.ConfigurationTarget.Global);
+      vscode.window.showInformationMessage(`TablePro Auto Save Queries: ${!current ? 'Enabled' : 'Disabled'}`);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.changeQueryContext', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.languageId !== 'sql') return;
+
+      const uri = editor.document.uri.toString();
+      const currentContext = queryDocContexts[uri];
+      const savedConfigs = await connectionManager.getSavedConnections();
+      const connectedIds = connectionManager.getConnectedIds();
+
+      if (connectedIds.length === 0) {
+        vscode.window.showWarningMessage('No active connections. Please connect to a database first.');
+        return;
+      }
+
+      const connItems = savedConfigs
+        .filter(c => connectedIds.includes(c.id))
+        .sort((a, b) => {
+          const currentId = currentContext?.connectionId || connectionManager.activeConnectionId;
+          if (a.id === currentId) return -1;
+          if (b.id === currentId) return 1;
+          return 0;
+        })
+        .map(c => ({
+          label: c.name || 'Untitled',
+          description: c.id === (currentContext?.connectionId || connectionManager.activeConnectionId) ? 'current' : (c.host ? `${c.host}:${c.port}` : c.filepath),
+          config: c
+        }));
+
+      if (connItems.length === 0) {
+        vscode.window.showWarningMessage('No active connections found.');
+        return;
+      }
+
+      const selectedConn = await vscode.window.showQuickPick(connItems, { placeHolder: 'Select Connection' });
+      if (!selectedConn) return;
+
+      const driver = connectionManager.getDriver(selectedConn.config.id);
+      if (!driver) return;
+
+      let dbName = '';
+      if (selectedConn.config.type !== DatabaseType.SQLite) {
+        try {
+          const databases = await driver.getDatabases();
+          const currentDb = selectedConn.config.id === currentContext?.connectionId
+            ? currentContext.database
+            : await getCurrentDatabaseName(selectedConn.config.id);
+          const dbItems = databases
+            .map(db => ({
+              label: db.name,
+              description: db.name === currentDb ? 'current' : undefined,
+            }))
+            .sort((a, b) => {
+              if (a.label === currentDb) return -1;
+              if (b.label === currentDb) return 1;
+              return 0;
+            });
+          const selectedDb = await vscode.window.showQuickPick(dbItems, { placeHolder: `Select Database${currentDb ? ` (${currentDb})` : ''}` });
+          if (!selectedDb) return;
+          dbName = selectedDb.label;
+        } catch (err) {
+          vscode.window.showErrorMessage(`Failed to load databases: ${err}`);
+          return;
+        }
+      }
+
+      // Update association
+      queryDocContexts[uri] = {
+        connectionId: selectedConn.config.id,
+        connectionName: selectedConn.config.name || 'Connected',
+        database: dbName
+      };
+      await context.workspaceState.update('queryDocContexts', queryDocContexts);
+
+      // Switch context
+      connectionManager.setActiveConnection(selectedConn.config.id);
+      if (dbName) {
+        try {
+          await driver.switchDatabase(dbName);
+        } catch (err) {
+          // ignore SQLite unsupported errors
+        }
+      }
+
+      schemaTreeProvider.clearCache();
+      schemaTreeProvider.refresh();
+
+      updateStatusBar();
+      vscode.window.showInformationMessage(`Query associated with: ${selectedConn.config.name || 'Connected'} [${dbName || 'main'}]`);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.cancelQuery', async () => {
+      await queryEngine.cancel();
+      vscode.window.showInformationMessage('Query cancelled.');
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.formatSQL', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) { return; }
+
+      try {
+        const { format } = require('sql-formatter');
+        const text = editor.selection.isEmpty
+          ? editor.document.getText()
+          : editor.document.getText(editor.selection);
+
+        const formatted = format(text, { language: 'sql', tabWidth: 2, keywordCase: 'upper' });
+
+        const range = editor.selection.isEmpty
+          ? new vscode.Range(
+              editor.document.positionAt(0),
+              editor.document.positionAt(editor.document.getText().length),
+            )
+          : editor.selection;
+
+        await editor.edit(editBuilder => { editBuilder.replace(range, formatted); });
+      } catch (err) {
+        vscode.window.showErrorMessage(`Format failed: ${err}`);
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.queryHistory', async () => {
+      const entry = await queryHistory.showQuickPick();
+      if (entry) {
+        // Open the selected query in a new editor
+        const doc = await vscode.workspace.openTextDocument({ language: 'sql', content: entry.sql + '\n' });
+        await vscode.window.showTextDocument(doc);
+      }
+    }),
+  );
+
+  // ── Schema Commands ──
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.openTable', async (connectionId?: string, tableInfo?: any) => {
+      if (!connectionId || !tableInfo) { return; }
+
+      const driver = connectionManager.getDriver(connectionId);
+      if (!driver) { vscode.window.showErrorMessage('Not connected.'); return; }
+
+      try {
+        const table = tableInfo.name;
+        const schema = tableInfo.schema;
+        const config = vscode.workspace.getConfiguration('tablepro');
+        const pageSize = config.get<number>('defaultRowsPerPage', 100);
+
+        const escapedTable = schema
+          ? `${driver.escapeIdentifier(schema)}.${driver.escapeIdentifier(table)}`
+          : driver.escapeIdentifier(table);
+
+        // Use limit+1 trick: fetch one extra row to know if there are more pages
+        const sql = `SELECT * FROM ${escapedTable} ${driver.paginationSQL(pageSize + 1, 0)}`;
+        const result = await driver.query(sql);
+
+        // Enrich column types with schema info
+        let enrichedResult = serializeQueryResult(result);
+        try {
+          const columnInfos = await driver.getColumns(table, schema);
+          if (columnInfos.length > 0) {
+            const infoMap = new Map(columnInfos.map(ci => [ci.name, ci]));
+            enrichedResult = {
+              ...enrichedResult,
+              columns: result.columns.map(col => {
+                const info = infoMap.get(col.name);
+                if (!info) return col;
+                return {
+                  ...col,
+                  type: info.type,           // e.g. varchar(255)
+                  rawType: info.type,
+                  normalizedType: info.normalizedType,
+                  maxLength: info.maxLength,
+                  precision: info.precision,
+                  scale: info.scale,
+                  isPrimaryKey: info.isPrimaryKey,
+                  isAutoIncrement: info.isAutoIncrement,
+                  nullable: info.nullable,
+                };
+              }),
+            };
+          }
+        } catch (e) {
+          // ignore enrichment failures, use raw types
+        }
+
+        // If we got pageSize+1 rows, trim back to pageSize and note there are more
+        const hasMore = enrichedResult.rows.length > pageSize;
+        if (hasMore) enrichedResult = { ...enrichedResult, rows: enrichedResult.rows.slice(0, pageSize) };
+
+        const dbName = await getCurrentDatabaseName(connectionId);
+        showResultsInDataGrid(table, enrichedResult, table, schema, connectionId, dbName, pageSize, hasMore);
+      } catch (err) {
+        vscode.window.showErrorMessage(`Failed to open table: ${err}`);
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.openStructure', async (item?: any) => {
+      let connectionId = item?.connectionId || connectionManager.activeConnectionId;
+      let tableInfo = item?.tableInfo;
+
+      if (!connectionId || !tableInfo) {
+        vscode.window.showErrorMessage('No table selected.');
+        return;
+      }
+
+      openTableStructure(connectionId, tableInfo);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.truncateTable', async (item?: any) => {
+      let connectionId = item?.connectionId || connectionManager.activeConnectionId;
+      let tableInfo = item?.tableInfo;
+
+      if (!connectionId || !tableInfo) {
+        vscode.window.showErrorMessage('No table selected.');
+        return;
+      }
+
+      const driver = connectionManager.getDriver(connectionId);
+      if (!driver) {
+        vscode.window.showErrorMessage('Not connected.');
+        return;
+      }
+
+      const tableName = tableInfo.name;
+      const schemaName = tableInfo.schema;
+      const confirm = await vscode.window.showWarningMessage(
+        `Are you sure you want to truncate table "${tableName}"? This will delete all rows.`,
+        { modal: true },
+        'Truncate'
+      );
+
+      if (confirm !== 'Truncate') { return; }
+
+      try {
+        const escapedTable = schemaName
+          ? `${driver.escapeIdentifier(schemaName)}.${driver.escapeIdentifier(tableName)}`
+          : driver.escapeIdentifier(tableName);
+
+        if (driver.driverType === 'sqlite') {
+          await driver.query(`DELETE FROM ${escapedTable}`);
+          try {
+            await driver.query(`DELETE FROM sqlite_sequence WHERE name = ${driver.escapeValue(tableName)}`);
+          } catch {}
+        } else {
+          await driver.query(`TRUNCATE TABLE ${escapedTable}`);
+        }
+
+        vscode.window.showInformationMessage(`Table "${tableName}" truncated successfully.`);
+        schemaTreeProvider.clearCache();
+        schemaTreeProvider.refresh();
+        schemaProvider.refresh();
+      } catch (err) {
+        vscode.window.showErrorMessage(`Failed to truncate table: ${err instanceof Error ? err.message : err}`);
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.dropTable', async (item?: any) => {
+      let connectionId = item?.connectionId || connectionManager.activeConnectionId;
+      let tableInfo = item?.tableInfo;
+
+      if (!connectionId || !tableInfo) {
+        vscode.window.showErrorMessage('No table selected.');
+        return;
+      }
+
+      const driver = connectionManager.getDriver(connectionId);
+      if (!driver) {
+        vscode.window.showErrorMessage('Not connected.');
+        return;
+      }
+
+      const tableName = tableInfo.name;
+      const schemaName = tableInfo.schema;
+      const confirm = await vscode.window.showWarningMessage(
+        `Are you sure you want to drop table "${tableName}"? This cannot be undone.`,
+        { modal: true },
+        'Drop'
+      );
+
+      if (confirm !== 'Drop') { return; }
+
+      try {
+        const escapedTable = schemaName
+          ? `${driver.escapeIdentifier(schemaName)}.${driver.escapeIdentifier(tableName)}`
+          : driver.escapeIdentifier(tableName);
+
+        await driver.query(`DROP TABLE ${escapedTable}`);
+
+        vscode.window.showInformationMessage(`Table "${tableName}" dropped successfully.`);
+        schemaTreeProvider.clearCache();
+        schemaTreeProvider.refresh();
+        schemaProvider.refresh();
+      } catch (err) {
+        vscode.window.showErrorMessage(`Failed to drop table: ${err instanceof Error ? err.message : err}`);
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.quickSwitcher', async () => {
+      const connId = connectionManager.activeConnectionId;
+      if (!connId) {
+        vscode.window.showWarningMessage('No active connection. Connect to a database first.');
+        return;
+      }
+
+      const driver = connectionManager.getDriver(connId);
+      if (!driver) { return; }
+
+      try {
+        let tables: any[] = [];
+        if (driver.driverType === 'postgresql') {
+          const schemas = await driver.getSchemas();
+          for (const s of schemas) {
+            const schemaTables = await driver.getTables(s.name);
+            tables.push(...schemaTables);
+          }
+        } else {
+          tables = await driver.getTables();
+        }
+
+        const items = tables.map(t => ({
+          label: t.name,
+          description: t.schema ? `Schema: ${t.schema}` : '',
+          detail: t.type === 'view' ? 'View' : 'Table',
+          tableInfo: t
+        }));
+
+        const selected = await vscode.window.showQuickPick(items, {
+          placeHolder: 'Search table/view name...',
+          title: 'Quick Table Switcher'
+        });
+
+        if (selected) {
+          vscode.commands.executeCommand('tablepro.openTable', connId, selected.tableInfo);
+        }
+      } catch (err) {
+        vscode.window.showErrorMessage(`Quick Switcher failed: ${err}`);
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.erDiagram', async (item?: any) => {
+      const connId = item?.config?.id || connectionManager.activeConnectionId;
+      if (!connId) {
+        vscode.window.showWarningMessage('No active connection.');
+        return;
+      }
+
+      const driver = connectionManager.getDriver(connId);
+      if (!driver) { return; }
+
+      const panelId = `er-diagram-${connId}`;
+      const title = `🎨 ER Diagram`;
+
+      webviewManager.showPanel(panelId, title, 'erDiagram', async (message: WebviewMessage) => {
+        if (message.type === 'ready') {
+          try {
+            let tables: any[] = [];
+            if (driver.driverType === 'postgresql') {
+              const schemas = await driver.getSchemas();
+              for (const s of schemas) {
+                const schemaTables = await driver.getTables(s.name);
+                tables.push(...schemaTables);
+              }
+            } else {
+              tables = await driver.getTables();
+            }
+
+            const diagramData: any[] = [];
+            for (const t of tables) {
+              const cols = await driver.getColumns(t.name, t.schema);
+              const fks = await driver.getForeignKeys(t.name, t.schema);
+              diagramData.push({
+                name: t.name,
+                schema: t.schema,
+                columns: cols,
+                foreignKeys: fks
+              });
+            }
+
+            webviewManager.postMessage(panelId, {
+              type: 'erDiagramData',
+              data: diagramData
+            });
+          } catch (err) {
+            vscode.window.showErrorMessage(`Failed to load ER Diagram: ${err}`);
+          }
+        }
+      });
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.exportData', async (item?: any) => {
+      let connectionId = item?.connectionId || connectionManager.activeConnectionId;
+      let tableInfo = item?.tableInfo;
+
+      if (!connectionId || !tableInfo) {
+        vscode.window.showErrorMessage('No table selected for export.');
+        return;
+      }
+
+      const driver = connectionManager.getDriver(connectionId);
+      if (!driver) { return; }
+
+      const formatItems = [
+        { label: 'CSV', value: 'csv', description: 'Comma Separated Values' },
+        { label: 'JSON', value: 'json', description: 'Javascript Object Notation' },
+        { label: 'SQL', value: 'sql', description: 'SQL Insert Statements Dump' }
+      ];
+
+      const selectedFormat = await vscode.window.showQuickPick(formatItems, {
+        placeHolder: 'Select export format'
+      });
+      if (!selectedFormat) return;
+
+      const fileUri = await vscode.window.showSaveDialog({
+        defaultUri: vscode.Uri.file(`${tableInfo.name}.${selectedFormat.value}`),
+        filters: {
+          [selectedFormat.label]: [selectedFormat.value]
+        }
+      });
+
+      if (!fileUri) return;
+
+      await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `Exporting ${tableInfo.name} to ${selectedFormat.value.toUpperCase()}...`,
+        cancellable: false
+      }, async () => {
+        try {
+          const escapedTable = tableInfo.schema
+            ? `${driver.escapeIdentifier(tableInfo.schema)}.${driver.escapeIdentifier(tableInfo.name)}`
+            : driver.escapeIdentifier(tableInfo.name);
+          const sql = `SELECT * FROM ${escapedTable}`;
+
+          await ImportExportService.exportData(
+            driver,
+            sql,
+            selectedFormat.value as any,
+            fileUri.fsPath,
+            tableInfo.name
+          );
+          vscode.window.showInformationMessage(`Export completed: ${fileUri.fsPath}`);
+        } catch (err) {
+          vscode.window.showErrorMessage(`Export failed: ${err instanceof Error ? err.message : err}`);
+        }
+      });
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.importData', async (item?: any) => {
+      let connectionId = item?.connectionId || connectionManager.activeConnectionId;
+      let tableInfo = item?.tableInfo;
+
+      if (!connectionId || !tableInfo) {
+        vscode.window.showErrorMessage('No table selected for import.');
+        return;
+      }
+
+      const driver = connectionManager.getDriver(connectionId);
+      if (!driver) { return; }
+
+      const formatItems = [
+        { label: 'CSV', value: 'csv' },
+        { label: 'JSON', value: 'json' }
+      ];
+
+      const selectedFormat = await vscode.window.showQuickPick(formatItems, {
+        placeHolder: 'Select import file format'
+      });
+      if (!selectedFormat) return;
+
+      const fileUris = await vscode.window.showOpenDialog({
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: false,
+        filters: {
+          [selectedFormat.label]: [selectedFormat.value]
+        }
+      });
+
+      if (!fileUris || fileUris.length === 0) return;
+      const fileUri = fileUris[0];
+
+      await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `Importing data into ${tableInfo.name}...`,
+        cancellable: false
+      }, async () => {
+        try {
+          const result = await ImportExportService.importData(
+            driver,
+            tableInfo.name,
+            tableInfo.schema,
+            selectedFormat.value as any,
+            fileUri.fsPath
+          );
+
+          if (result.errors.length > 0) {
+            vscode.window.showWarningMessage(
+              `Import completed with errors. Inserted: ${result.inserted} rows. First error: ${result.errors[0]}`
+            );
+          } else {
+            vscode.window.showInformationMessage(`Import completed successfully: ${result.inserted} rows inserted.`);
+          }
+
+          schemaTreeProvider.clearCache();
+          schemaTreeProvider.refresh();
+          schemaProvider.refresh();
+        } catch (err) {
+          vscode.window.showErrorMessage(`Import failed: ${err instanceof Error ? err.message : err}`);
+        }
+      });
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.explainPlan', async () => {
+      const connId = connectionManager.activeConnectionId;
+      if (!connId) {
+        vscode.window.showWarningMessage('No active connection.');
+        return;
+      }
+
+      const driver = connectionManager.getDriver(connId);
+      if (!driver) return;
+
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        vscode.window.showErrorMessage('Open an SQL file and select a query first.');
+        return;
+      }
+
+      const sql = editor.document.getText(editor.selection) || editor.document.getText();
+      if (!sql.trim()) {
+        vscode.window.showErrorMessage('No SQL query selected.');
+        return;
+      }
+
+      await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: 'Running EXPLAIN query...',
+        cancellable: false
+      }, async () => {
+        try {
+          let planResult: any = null;
+          if (driver.driverType === 'postgresql') {
+            try {
+              const res = await driver.query(`EXPLAIN (FORMAT JSON) ${sql}`);
+              planResult = { format: 'json', raw: res.rows[0]?.[0] };
+            } catch {
+              const res = await driver.query(`EXPLAIN ${sql}`);
+              planResult = { format: 'text', raw: res.rows.map(r => r[0]).join('\n') };
+            }
+          } else if (driver.driverType === 'mysql') {
+            try {
+              const res = await driver.query(`EXPLAIN FORMAT=JSON ${sql}`);
+              planResult = { format: 'json', raw: res.rows[0]?.[0] || res.rows[0]?.[1] };
+            } catch {
+              const res = await driver.query(`EXPLAIN ${sql}`);
+              planResult = { format: 'text', raw: res.rows.map(r => JSON.stringify(r)).join('\n') };
+            }
+          } else if (driver.driverType === 'sqlite') {
+            try {
+              const res = await driver.query(`EXPLAIN QUERY PLAN ${sql}`);
+              planResult = { format: 'sqlite', raw: res.rows };
+            } catch (err) {
+              vscode.window.showErrorMessage(`EXPLAIN failed: ${err}`);
+              return;
+            }
+          }
+
+          const panelId = `query-plan-${Date.now()}`;
+          webviewManager.showPanel(panelId, '🔍 Query Plan', 'queryPlan', async (message: WebviewMessage) => {
+            if (message.type === 'ready') {
+              webviewManager.postMessage(panelId, {
+                type: 'planData',
+                data: {
+                  sql,
+                  driverType: driver.driverType,
+                  plan: planResult
+                }
+              });
+            }
+          });
+        } catch (err) {
+          vscode.window.showErrorMessage(`EXPLAIN failed: ${err instanceof Error ? err.message : err}`);
+        }
+      });
+    }),
+  );
+
+  async function openTableStructure(connectionId: string, tableInfo: any) {
+    const driver = connectionManager.getDriver(connectionId);
+    if (!driver) {
+      vscode.window.showErrorMessage('Not connected.');
+      return;
+    }
+
+    const tableName = tableInfo.name;
+    const schemaName = tableInfo.schema;
+    const panelId = `table-structure-${connectionId}-${schemaName || 'default'}-${tableName}`;
+    const title = `🔧 Structure: ${tableName}`;
+
+    webviewManager.showPanel(panelId, title, 'structureView', async (message: WebviewMessage) => {
+      if (message.type === 'ready') {
+        try {
+          const columns = await driver.getColumns(tableName, schemaName);
+          const indexes = await driver.getIndexes(tableName, schemaName);
+          const foreignKeys = await driver.getForeignKeys(tableName, schemaName);
+
+          let ddl = '';
+          if (driver.driverType === 'mysql') {
+            const result = await driver.query(`SHOW CREATE TABLE ${driver.escapeIdentifier(tableName)}`);
+            ddl = result.rows[0]?.[1] as string || '';
+          } else if (driver.driverType === 'postgresql') {
+            ddl = generateCreateTableDDL(tableName, columns, driver);
+          } else if (driver.driverType === 'sqlite') {
+            const result = await driver.query(
+              `SELECT sql FROM sqlite_master WHERE type='table' AND name=${driver.escapeValue(tableName)}`
+            );
+            ddl = result.rows[0]?.[0] as string || '';
+          }
+
+          webviewManager.postMessage(panelId, {
+            type: 'structureData',
+            data: {
+              tableName,
+              schemaName,
+              columns,
+              indexes,
+              foreignKeys,
+              ddl
+            }
+          });
+        } catch (err) {
+          vscode.window.showErrorMessage(`Failed to load structure: ${err}`);
+        }
+      }
+
+      if (message.type === 'executeDDL') {
+        try {
+          const sql = message.data.sql;
+          await driver.query(sql);
+          vscode.window.showInformationMessage('Structure updated successfully.');
+          webviewManager.postMessage(panelId, { type: 'reloadStructure' });
+          schemaTreeProvider.clearCache();
+          schemaTreeProvider.refresh();
+          schemaProvider.refresh();
+        } catch (err) {
+          vscode.window.showErrorMessage(`Failed to apply changes: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+    });
+  }
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.showDDL', async (item?: any) => {
+      if (!item?.tableInfo) { return; }
+      const connectionId = connectionManager.activeConnectionId;
+      if (!connectionId) { return; }
+      const driver = connectionManager.getDriver(connectionId);
+      if (!driver) { return; }
+
+      try {
+        let ddl = '';
+        const table = item.tableInfo.name;
+
+        if (driver.driverType === 'mysql') {
+          const result = await driver.query(`SHOW CREATE TABLE ${driver.escapeIdentifier(table)}`);
+          ddl = result.rows[0]?.[1] as string || '';
+        } else if (driver.driverType === 'postgresql') {
+          const cols = await driver.getColumns(table);
+          ddl = generateCreateTableDDL(table, cols, driver);
+        } else if (driver.driverType === 'sqlite') {
+          const result = await driver.query(
+            `SELECT sql FROM sqlite_master WHERE type='table' AND name=${driver.escapeValue(table)}`
+          );
+          ddl = result.rows[0]?.[0] as string || '';
+        }
+
+        const doc = await vscode.workspace.openTextDocument({ language: 'sql', content: ddl + ';\n' });
+        await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+      } catch (err) {
+        vscode.window.showErrorMessage(`Failed to get DDL: ${err}`);
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.switchDatabase', async (connectionId?: string, dbName?: string) => {
+      if (!connectionId) { connectionId = connectionManager.activeConnectionId; }
+      if (!connectionId) { return; }
+
+      const driver = connectionManager.getDriver(connectionId);
+      if (!driver) { return; }
+
+      if (!dbName) {
+        const databases = await driver.getDatabases();
+        const selected = await vscode.window.showQuickPick(databases.map(db => db.name), { placeHolder: 'Select database' });
+        if (!selected) { return; }
+        dbName = selected;
+      }
+
+      try {
+        await driver.switchDatabase(dbName);
+        const editor = vscode.window.activeTextEditor;
+        if (editor && editor.document.languageId === 'sql') {
+          const uri = editor.document.uri.toString();
+          const mapped = queryDocContexts[uri];
+          if (mapped?.connectionId === connectionId) {
+            queryDocContexts[uri] = { ...mapped, database: dbName };
+            await context.workspaceState.update('queryDocContexts', queryDocContexts);
+          }
+        }
+        schemaTreeProvider.clearCache();
+        schemaTreeProvider.refresh();
+        schemaProvider.refresh();
+        updateStatusBar();
+        vscode.window.showInformationMessage(`Switched to database: ${dbName}`);
+      } catch (err) {
+        vscode.window.showErrorMessage(`Failed to switch database: ${err}`);
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.openTerminal', async (item?: any) => {
+      let connectionId = item?.id || item?.connectionId || connectionManager.activeConnectionId;
+      if (!connectionId) {
+        vscode.window.showWarningMessage('No connection selected.');
+        return;
+      }
+
+      const activeConn = connectionManager.getActiveConnection(connectionId);
+      if (!activeConn) {
+        vscode.window.showErrorMessage('Connection is not active. Please connect first.');
+        return;
+      }
+
+      const { config, driver, tunnel } = activeConn;
+      let activeDb = config.database || '';
+      if (driver && driver.isConnected) {
+        try {
+          activeDb = await driver.getCurrentDatabase();
+        } catch {}
+      }
+
+      const connectHost = tunnel ? '127.0.0.1' : config.host;
+      const connectPort = tunnel ? tunnel.localPort : config.port;
+
+      let shellCommand = '';
+      const terminalName = `TablePro CLI: ${config.name}`;
+
+      if (config.type === 'mysql') {
+        const portOption = connectPort ? `-P ${connectPort}` : '';
+        const dbOption = activeDb ? (driver?.escapeIdentifier ? driver.escapeIdentifier(activeDb) : activeDb) : '';
+        const passwordPart = config.password ? `-p"${config.password.replace(/"/g, '\\"')}"` : '';
+        shellCommand = `mysql -h ${connectHost} ${portOption} -u ${config.username} ${passwordPart} ${dbOption}`;
+      } else if (config.type === 'postgresql') {
+        const portOption = connectPort ? `-p ${connectPort}` : '';
+        const dbOption = activeDb ? `-d "${activeDb.replace(/"/g, '\\"')}"` : '';
+        const envPart = config.password ? `PGPASSWORD="${config.password.replace(/"/g, '\\"')}" ` : '';
+        shellCommand = `${envPart}psql -h ${connectHost} ${portOption} -U ${config.username} ${dbOption}`;
+      } else if (config.type === 'sqlite') {
+        const dbPath = config.database;
+        if (!dbPath) {
+          vscode.window.showErrorMessage('SQLite database file path is not set.');
+          return;
+        }
+        shellCommand = `sqlite3 "${dbPath.replace(/"/g, '\\"')}"`;
+      } else {
+        vscode.window.showErrorMessage(`Terminal CLI integration is not supported for ${config.type}.`);
+        return;
+      }
+
+      try {
+        const terminal = vscode.window.createTerminal({ name: terminalName });
+        terminal.show();
+        terminal.sendText(shellCommand);
+      } catch (err) {
+        vscode.window.showErrorMessage(`Failed to open terminal CLI: ${err}`);
+      }
+    }),
+  );
+
+  // ── Refresh Commands ──
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.refreshConnections', () => connectionTreeProvider.refresh()),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.refreshSchema', () => {
+      schemaTreeProvider.clearCache();
+      schemaTreeProvider.refresh();
+      schemaProvider.refresh();
+    }),
+  );
+
+  // ── Status Bar ──
+
+  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusBar.command = 'tablepro.switchDatabase';
+  context.subscriptions.push(statusBar);
+
+  connectionManager.onActiveConnectionChanged(async (id) => {
+    if (id) {
+      const configs = await connectionManager.getSavedConnections();
+      const config = configs.find(c => c.id === id);
+      const driver = connectionManager.getDriver(id);
+      if (config && driver) {
+        try {
+          const db = await driver.getCurrentDatabase();
+          const meta = DATABASE_TYPE_META[config.type];
+          statusBar.text = `$(database) ${config.name}: ${db}`;
+          statusBar.tooltip = `${meta?.label || config.type} — Click to switch database`;
+          statusBar.show();
+        } catch {
+          statusBar.text = `$(database) ${config.name}`;
+          statusBar.show();
+        }
+      }
+    } else {
+      statusBar.hide();
+    }
+  });
+
+  // ── Helper Functions ──
+
+  function serializeQueryResult(result: QueryResult): QueryResult {
+    return {
+      ...result,
+      rows: result.rows.map(row =>
+        row.map(v => {
+          if (v === null || v === undefined) return null;
+          if (Buffer.isBuffer(v)) return v.toString('utf8');
+          if (typeof v === 'bigint') return v.toString();
+          if (typeof v === 'object') {
+            try { return JSON.stringify(v); } catch { return String(v); }
+          }
+          return v;
+        })
+      ),
+    };
+  }
+
+  function openConnectionForm(config: ConnectionConfig) {
+    const panelId = `connection-form-${config.id || 'new'}`;
+    const title = config.name ? `Edit: ${config.name}` : 'New Connection';
+
+    webviewManager.showPanel(panelId, title, 'connectionForm', async (message: WebviewMessage) => {
+      switch (message.type) {
+        case 'saveConnection': {
+          try {
+            await connectionManager.saveConnection(message.data);
+            webviewManager.postMessage(panelId, { type: 'saveResult', data: { success: true, message: 'Connection saved.' } });
+            webviewManager.closePanel(panelId);
+            vscode.window.showInformationMessage('Connection saved.');
+          } catch (err) {
+            webviewManager.postMessage(panelId, { type: 'saveResult', data: { success: false, message: `Failed: ${err}` } });
+          }
+          break;
+        }
+        case 'testConnection': {
+          const result = await connectionManager.testConnection(message.data);
+          if (result.success) { vscode.window.showInformationMessage(`✅ ${result.message}`); }
+          else { vscode.window.showErrorMessage(`❌ ${result.message}`); }
+          break;
+        }
+        case 'ready':
+          webviewManager.postMessage(panelId, { type: 'connectionConfig', data: config });
+          try {
+            const sshHosts = parseSSHConfig();
+            webviewManager.postMessage(panelId, { type: 'sshHosts', data: sshHosts });
+          } catch (err) {
+            Logger.getInstance().logError('Failed to send SSH hosts to connection form', err);
+          }
+          break;
+      }
+    });
+  }
+
+  async function executeAndShowResults(sql: string) {
+    try {
+      const result = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Running query...', cancellable: true },
+        async () => queryEngine.execute(sql),
+      );
+      const serializedResult = serializeQueryResult(result);
+
+      if (serializedResult.columns.length > 0) {
+        await vscode.commands.executeCommand('tablepro.queryResultsView.focus');
+        queryResultsViewProvider.postMessage({
+          type: 'queryResult',
+          data: serializedResult,
+          pageSize: vscode.workspace.getConfiguration('tablepro').get<number>('defaultRowsPerPage', 1000),
+        } as any);
+      } else {
+        vscode.window.showInformationMessage(
+          `Query executed: ${result.affectedRows} rows affected (${result.executionTime}ms)`
+        );
+      }
+    } catch (err) {
+      vscode.window.showErrorMessage(`Query error: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  function showResultsInDataGrid(
+    title: string,
+    result: QueryResult,
+    tableName?: string,
+    schemaName?: string,
+    connectionId?: string,
+    database?: string,
+    pageSizeOverride?: number,
+    initialHasMore = false
+  ) {
+    const panelId = `data-grid-${Date.now()}`;
+    const connId = connectionId || connectionManager.activeConnectionId;
+    const pageSizeForGrid = pageSizeOverride || vscode.workspace.getConfiguration('tablepro').get<number>('defaultRowsPerPage', 1000);
+
+    webviewManager.showPanel(panelId, `📊 ${title}`, 'dataGrid', async (message: WebviewMessage) => {
+      if (message.type === 'ready') {
+        webviewManager.postMessage(panelId, { type: 'queryResult', data: result, tableName, schemaName, pageSize: pageSizeForGrid, hasMore: initialHasMore } as any);
+      }
+
+      if (message.type === 'rowSelected') {
+        webviewManager.postMessage('tablepro-quick-view', {
+          type: 'rowSelected',
+          data: message.data
+        });
+      }
+
+      if (message.type === 'countRows' && connId && tableName) {
+        const driver = connectionManager.getDriver(connId);
+        if (driver) {
+          try {
+            const escapedTable = schemaName
+              ? `${driver.escapeIdentifier(schemaName)}.${driver.escapeIdentifier(tableName)}`
+              : driver.escapeIdentifier(tableName);
+            const whereFilter = (message as any).data?.whereFilter as string | undefined;
+            let countSql = `SELECT COUNT(*) AS total FROM ${escapedTable}`;
+            if (whereFilter && whereFilter.trim()) {
+              countSql += ` WHERE ${whereFilter}`;
+            }
+            const countResult = await driver.query(countSql);
+            const firstRow = countResult.rows[0] as any;
+            const total = Number(firstRow?.total ?? firstRow?.TOTAL ?? firstRow?.[0] ?? 0);
+            webviewManager.postMessage(panelId, {
+              type: 'totalRowsCount',
+              data: { totalRows: total }
+            });
+          } catch (err) {
+            vscode.window.showErrorMessage(`Failed to count table rows: ${err}`);
+          }
+        }
+      }
+
+      if (message.type === 'fetchPage' && connId && tableName) {
+        const driver = connectionManager.getDriver(connId);
+        if (driver) {
+          try {
+            const page = message.data.page;
+            const sortStates: { column: number; direction: 'asc' | 'desc' }[] = (message as any).data.sortStates || [];
+            const whereFilter: string | undefined = (message as any).data.whereFilter;
+
+            const escapedTable = schemaName
+              ? `${driver.escapeIdentifier(schemaName)}.${driver.escapeIdentifier(tableName)}`
+              : driver.escapeIdentifier(tableName);
+
+            let sql = `SELECT * FROM ${escapedTable}`;
+            if (whereFilter && whereFilter.trim()) {
+              sql += ` WHERE ${whereFilter}`;
+            }
+            if (sortStates.length > 0) {
+              const orderParts = sortStates.map(s => {
+                const colName = result.columns[s.column]?.name;
+                if (!colName) return null;
+                return `${driver.escapeIdentifier(colName)} ${s.direction === 'desc' ? 'DESC' : 'ASC'}`;
+              }).filter(Boolean).join(', ');
+              if (orderParts) sql += ` ORDER BY ${orderParts}`;
+            }
+
+            const pageSize = vscode.workspace.getConfiguration('tablepro').get<number>('defaultRowsPerPage', 1000);
+            const offset = page * pageSize;
+            // Use limit+1 trick to detect if next page exists
+            sql += ` ${driver.paginationSQL(pageSize + 1, offset)}`;
+
+            const pageResult = serializeQueryResult(await driver.query(sql));
+
+            const hasMore = pageResult.rows.length > pageSize;
+            const trimmedRows = hasMore ? pageResult.rows.slice(0, pageSize) : pageResult.rows;
+
+            webviewManager.postMessage(panelId, {
+              type: 'pageData',
+              page,
+              data: { ...pageResult, columns: result.columns, rows: trimmedRows },
+              sortStates: sortStates,
+              hasMore,
+              pageSize,
+              totalRows: hasMore ? undefined : (offset + trimmedRows.length),
+            } as any);
+          } catch (err) {
+            vscode.window.showErrorMessage(`Failed to fetch page data: ${err}`);
+          }
+        }
+      }
+
+      if ((message as any).type === 'openNewTab') {
+        vscode.commands.executeCommand('tablepro.newQuery', { connectionId: connId, database });
+      }
+
+      if (message.type === 'saveChanges' && connId && tableName) {
+        const driver = connectionManager.getDriver(connId);
+        if (!driver) { vscode.window.showErrorMessage('Not connected'); return; }
+
+        try {
+          const changedRows = message.data.rows as any[];
+          const columns = result.columns.map(c => c.name);
+          const pkCols = result.columns.filter(c => c.isPrimaryKey).map(c => c.name);
+          const escapedTable = schemaName
+            ? `${driver.escapeIdentifier(schemaName)}.${driver.escapeIdentifier(tableName)}`
+            : driver.escapeIdentifier(tableName);
+
+          const statements: string[] = [];
+          for (const row of changedRows) {
+            if (row.status === 'modified') {
+              const sets = (row.changedCols as number[]).map(ci =>
+                `${driver.escapeIdentifier(columns[ci])} = ${driver.escapeValue(row.data[ci])}`
+              ).join(', ');
+              const where = (pkCols.length > 0 ? pkCols : columns).map(col => {
+                const ci = columns.indexOf(col);
+                const val = row.original[ci];
+                return val === null ? `${driver.escapeIdentifier(col)} IS NULL` : `${driver.escapeIdentifier(col)} = ${driver.escapeValue(val)}`;
+              }).join(' AND ');
+              statements.push(`UPDATE ${escapedTable} SET ${sets} WHERE ${where}`);
+            } else if (row.status === 'added') {
+              const nonNull = columns.map((col, i) => ({ col, val: row.data[i] })).filter(x => x.val !== null);
+              if (nonNull.length > 0) {
+                statements.push(`INSERT INTO ${escapedTable} (${nonNull.map(x => driver.escapeIdentifier(x.col)).join(', ')}) VALUES (${nonNull.map(x => driver.escapeValue(x.val)).join(', ')})`);
+              }
+            } else if (row.status === 'deleted') {
+              const where = (pkCols.length > 0 ? pkCols : columns).map(col => {
+                const ci = columns.indexOf(col);
+                const val = row.original[ci];
+                return val === null ? `${driver.escapeIdentifier(col)} IS NULL` : `${driver.escapeIdentifier(col)} = ${driver.escapeValue(val)}`;
+              }).join(' AND ');
+              statements.push(`DELETE FROM ${escapedTable} WHERE ${where}`);
+            }
+          }
+
+          if (statements.length === 0) { return; }
+
+          // Execute all statements
+          for (const stmt of statements) { await driver.query(stmt); }
+          vscode.window.showInformationMessage(`✅ ${statements.length} changes saved.`);
+
+          // Refresh the grid
+          const pageSize = vscode.workspace.getConfiguration('tablepro').get<number>('defaultRowsPerPage', 1000);
+          const refreshSql = `SELECT * FROM ${escapedTable} ${driver.paginationSQL(pageSize + 1, 0)}`;
+          const refreshResult = serializeQueryResult(await driver.query(refreshSql));
+          const hasMore = refreshResult.rows.length > pageSize;
+          const rows = hasMore ? refreshResult.rows.slice(0, pageSize) : refreshResult.rows;
+          webviewManager.postMessage(panelId, {
+            type: 'queryResult',
+            data: { ...refreshResult, columns: result.columns, rows },
+            tableName,
+            schemaName,
+            pageSize,
+            hasMore,
+          } as any);
+        } catch (err) {
+          vscode.window.showErrorMessage(`Save failed: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+
+      if (message.type === 'previewSQL' && connId && tableName) {
+        const driver = connectionManager.getDriver(connId);
+        if (!driver) return;
+        const changedRows = message.data.rows as any[];
+        const columns = result.columns.map(c => c.name);
+        const pkCols = result.columns.filter(c => c.isPrimaryKey).map(c => c.name);
+        const escapedTable = schemaName
+          ? `${driver.escapeIdentifier(schemaName)}.${driver.escapeIdentifier(tableName)}`
+          : driver.escapeIdentifier(tableName);
+
+        const stmts: string[] = [];
+        for (const row of changedRows) {
+          if (row.status === 'modified') {
+            const sets = (row.changedCols as number[]).map(ci => `${driver.escapeIdentifier(columns[ci])} = ${driver.escapeValue(row.data[ci])}`).join(', ');
+            const where = (pkCols.length > 0 ? pkCols : columns).map(col => { const ci = columns.indexOf(col); const val = row.original[ci]; return val === null ? `${driver.escapeIdentifier(col)} IS NULL` : `${driver.escapeIdentifier(col)} = ${driver.escapeValue(val)}`; }).join(' AND ');
+            stmts.push(`UPDATE ${escapedTable} SET ${sets} WHERE ${where};`);
+          } else if (row.status === 'added') {
+            const nonNull = columns.map((col, i) => ({ col, val: row.data[i] })).filter(x => x.val !== null);
+            if (nonNull.length > 0) stmts.push(`INSERT INTO ${escapedTable} (${nonNull.map(x => driver.escapeIdentifier(x.col)).join(', ')}) VALUES (${nonNull.map(x => driver.escapeValue(x.val)).join(', ')});`);
+          } else if (row.status === 'deleted') {
+            const where = (pkCols.length > 0 ? pkCols : columns).map(col => { const ci = columns.indexOf(col); const val = row.original[ci]; return val === null ? `${driver.escapeIdentifier(col)} IS NULL` : `${driver.escapeIdentifier(col)} = ${driver.escapeValue(val)}`; }).join(' AND ');
+            stmts.push(`DELETE FROM ${escapedTable} WHERE ${where};`);
+          }
+        }
+        if (stmts.length > 0) {
+          const doc = await vscode.workspace.openTextDocument({ language: 'sql', content: `-- Preview: ${stmts.length} changes\n\n${stmts.join('\n\n')}\n` });
+          await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+        }
+      }
+
+      if (message.type === 'openQuickView') {
+        openQuickViewPanel(message.data.columns, message.data.rowData);
+      }
+    }, vscode.ViewColumn.Active);
+  }
+
+  function openQuickViewPanel(columns: any[], rowData: any[]) {
+    const panelId = 'tablepro-quick-view';
+    webviewManager.showPanel(
+      panelId,
+      '🔍 Row Quick View',
+      'quickView',
+      (message) => {
+        if (message.type === 'ready') {
+          webviewManager.postMessage(panelId, {
+            type: 'quickViewData',
+            data: { columns, rowData }
+          });
+        }
+      },
+      vscode.ViewColumn.Beside
+    );
+  }
+
+  function getCurrentStatement(editor: vscode.TextEditor): string {
+    const doc = editor.document;
+    const cursorLine = editor.selection.active.line;
+    let startLine = cursorLine;
+    let endLine = cursorLine;
+
+    while (startLine > 0) {
+      const line = doc.lineAt(startLine - 1).text.trim();
+      if (line === '' || line.endsWith(';')) { break; }
+      startLine--;
+    }
+    while (endLine < doc.lineCount - 1) {
+      const line = doc.lineAt(endLine).text.trim();
+      if (line.endsWith(';')) { break; }
+      endLine++;
+    }
+
+    const range = new vscode.Range(startLine, 0, endLine, doc.lineAt(endLine).text.length);
+    let text = doc.getText(range).trim();
+    if (text.endsWith(';')) { text = text.slice(0, -1).trim(); }
+    return text;
+  }
+
+  function generateCreateTableDDL(table: string, columns: any[], driver: any): string {
+    const lines = columns.map((col: any) => {
+      let line = `  ${driver.escapeIdentifier(col.name)} ${col.type}`;
+      if (!col.nullable) { line += ' NOT NULL'; }
+      if (col.defaultValue !== null && col.defaultValue !== undefined) { line += ` DEFAULT ${col.defaultValue}`; }
+      return line;
+    });
+    const pkCols = columns.filter((c: any) => c.isPrimaryKey).map((c: any) => driver.escapeIdentifier(c.name));
+    if (pkCols.length > 0) { lines.push(`  PRIMARY KEY (${pkCols.join(', ')})`); }
+    return `CREATE TABLE ${driver.escapeIdentifier(table)} (\n${lines.join(',\n')}\n)`;
+  }
+
+  // Register SQLite custom editor provider
+  context.subscriptions.push(
+    vscode.window.registerCustomEditorProvider(
+      'tablepro.sqliteViewer',
+      new SqliteCustomEditorProvider(openSQLiteFile)
+    )
+  );
+
+  // Trigger .env auto-import on startup
+  scanWorkspaceForDatabaseConfigs();
+
+  // Watch for workspace folder changes to re-trigger scan
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      scanWorkspaceForDatabaseConfigs();
+    })
+  );
+}
+
+// ── SQLite Custom Editor Provider ──
+
+class SqliteCustomEditorProvider implements vscode.CustomEditorProvider {
+  constructor(private openSQLiteFn: (uri: vscode.Uri) => Promise<void>) {}
+
+  readonly onDidChangeCustomDocument = new vscode.EventEmitter<vscode.CustomDocumentEditEvent<vscode.CustomDocument>>().event;
+
+  async saveCustomDocument(document: vscode.CustomDocument, cancellation: vscode.CancellationToken): Promise<void> {}
+  async saveCustomDocumentAs(document: vscode.CustomDocument, destination: vscode.Uri, cancellation: vscode.CancellationToken): Promise<void> {}
+  async revertCustomDocument(document: vscode.CustomDocument, cancellation: vscode.CancellationToken): Promise<void> {}
+  async backupCustomDocument(document: vscode.CustomDocument, context: vscode.CustomDocumentBackupContext, cancellation: vscode.CancellationToken): Promise<vscode.CustomDocumentBackup> {
+    return {
+      id: '',
+      delete: () => {}
+    };
+  }
+
+  async openCustomDocument(
+    uri: vscode.Uri,
+    openContext: vscode.CustomDocumentOpenContext,
+    token: vscode.CancellationToken
+  ): Promise<vscode.CustomDocument> {
+    return {
+      uri,
+      dispose: () => {}
+    };
+  }
+
+  async resolveCustomEditor(
+    document: vscode.CustomDocument,
+    webviewPanel: vscode.WebviewPanel,
+    token: vscode.CancellationToken
+  ): Promise<void> {
+    // Immediately close the editor panel because we are opening it in the TablePro views
+    webviewPanel.dispose();
+    
+    // Call our opener function
+    await this.openSQLiteFn(document.uri);
+  }
+}
+
+// ── SSH Config Parser ──
+
+export interface SSHConfigHost {
+  host: string;
+  hostName?: string;
+  user?: string;
+  port?: number;
+  identityFile?: string;
+}
+
+export function parseSSHConfig(customPath?: string): SSHConfigHost[] {
+  const sshConfigPath = customPath || path.join(os.homedir(), '.ssh', 'config');
+  if (!fs.existsSync(sshConfigPath)) {
+    return [];
+  }
+
+  try {
+    const content = fs.readFileSync(sshConfigPath, 'utf8');
+    const lines = content.split(/\r?\n/);
+    const hosts: SSHConfigHost[] = [];
+    let currentHost: SSHConfigHost | null = null;
+
+    for (let line of lines) {
+      line = line.trim();
+      if (!line || line.startsWith('#')) {
+        continue;
+      }
+
+      const match = line.match(/^(\S+)\s+(.+)$/);
+      if (!match) {
+        continue;
+      }
+
+      const key = match[1].toLowerCase();
+      const value = match[2].trim().replace(/^"(.*)"$/, '$1');
+
+      if (key === 'host') {
+        if (value === '*') {
+          continue;
+        }
+        const aliases = value.split(/\s+/);
+        for (const alias of aliases) {
+          currentHost = { host: alias };
+          hosts.push(currentHost);
+        }
+      } else if (currentHost) {
+        if (key === 'hostname') {
+          currentHost.hostName = value;
+        } else if (key === 'user') {
+          currentHost.user = value;
+        } else if (key === 'port') {
+          currentHost.port = parseInt(value, 10);
+        } else if (key === 'identityfile') {
+          let keyPath = value;
+          if (keyPath.startsWith('~/')) {
+            keyPath = path.join(os.homedir(), keyPath.slice(2));
+          }
+          currentHost.identityFile = keyPath;
+        }
+      }
+    }
+    return hosts;
+  } catch (err) {
+    Logger.getInstance().logError('Failed to parse SSH config file', err);
+    return [];
+  }
+}
+
+// ── SQLite Opener Function ──
+
+async function openSQLiteFile(uri: vscode.Uri) {
+  const filePath = uri.fsPath;
+  const fileName = path.basename(filePath);
+
+  try {
+    const savedConnections = await connectionManager.getSavedConnections();
+    let conn = savedConnections.find(
+      c => c.type === 'sqlite' && (c.filepath === filePath || c.database === filePath)
+    );
+
+    let id: string;
+    if (conn) {
+      id = conn.id;
+    } else {
+      const newConfig: ConnectionConfig = {
+        id: uuidv4(),
+        name: `${fileName} (SQLite)`,
+        type: DatabaseType.SQLite,
+        host: '',
+        port: 0,
+        username: '',
+        password: '',
+        database: filePath,
+        filepath: filePath,
+        ssl: { mode: SSLMode.Disabled },
+        ssh: { enabled: false, host: '', port: 22, username: '', authMethod: 'password' },
+        options: {},
+        group: 'SQLite Files',
+        tags: ['sqlite', 'local'],
+        color: '',
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      id = await connectionManager.saveConnection(newConfig);
+    }
+
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Opening SQLite database ${fileName}...`, cancellable: false },
+      () => connectionManager.connect(id)
+    );
+
+    vscode.window.showInformationMessage(`Connected to SQLite database: ${fileName}`);
+    connectionTreeProvider.refresh();
+    schemaTreeProvider.clearCache();
+    schemaTreeProvider.refresh();
+    schemaProvider.refresh();
+  } catch (err) {
+    vscode.window.showErrorMessage(`Failed to open SQLite database: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+// ── Workspace .env Scanner & DB Importer ──
+
+export function parseDatabaseUrl(urlStr: string, env: Record<string, string>): Partial<ConnectionConfig> | null {
+  urlStr = urlStr.replace(/\${([^}]+)}/g, (_, name) => env[name] || '');
+
+  try {
+    if (urlStr.startsWith('sqlite:') || urlStr.startsWith('file:')) {
+      const filePath = urlStr.replace(/^(sqlite|file):(?:\/\/)?/, '');
+      return {
+        type: 'sqlite',
+        database: filePath,
+        filepath: filePath,
+      } as any;
+    }
+
+    const parsed = new URL(urlStr);
+    let type: string | null = null;
+    let defaultPort = 0;
+
+    const protocol = parsed.protocol.replace(':', '');
+    if (protocol.startsWith('mysql')) {
+      type = 'mysql';
+      defaultPort = 3306;
+    } else if (protocol.startsWith('postgres') || protocol === 'pgsql') {
+      type = 'postgresql';
+      defaultPort = 5432;
+    } else if (protocol === 'sqlite' || protocol === 'sqlite3') {
+      type = 'sqlite';
+    }
+
+    if (!type) {
+      return null;
+    }
+
+    if (type === 'sqlite') {
+      const filePath = parsed.pathname || parsed.hostname;
+      return {
+        type: 'sqlite',
+        database: filePath,
+        filepath: filePath,
+      } as any;
+    }
+
+    const host = parsed.hostname;
+    const port = parsed.port ? parseInt(parsed.port, 10) : defaultPort;
+    const username = decodeURIComponent(parsed.username || '');
+    const password = decodeURIComponent(parsed.password || '');
+    const database = decodeURIComponent(parsed.pathname.replace(/^\//, '') || '');
+
+    return {
+      type,
+      host,
+      port,
+      username,
+      password,
+      database,
+    } as any;
+  } catch (err) {
+    return null;
+  }
+}
+
+export async function detectDatabaseConfigsInFile(filePath: string, workspaceName: string): Promise<Partial<ConnectionConfig>[]> {
+  if (!fs.existsSync(filePath)) {
+    return [];
+  }
+
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    const lines = content.split(/\r?\n/);
+    const env: Record<string, string> = {};
+
+    for (let line of lines) {
+      line = line.trim();
+      if (!line || line.startsWith('#')) {
+        continue;
+      }
+      const parts = line.split('=');
+      if (parts.length >= 2) {
+        const key = parts[0].trim();
+        let val = parts.slice(1).join('=').trim();
+        val = val.replace(/^["'](.*)["']$/, '$1');
+        env[key] = val;
+      }
+    }
+
+    const configs: Partial<ConnectionConfig>[] = [];
+
+    // 1. Check for DATABASE_URL or similar URL variables
+    const urlVars = ['DATABASE_URL', 'DB_URL', 'SPRING_DATASOURCE_URL', 'JAWSDB_URL', 'CLEARDB_DATABASE_URL', 'DATABASE_PRIVATE_URL'];
+    for (const key of Object.keys(env)) {
+      if (urlVars.includes(key) || key.endsWith('_DATABASE_URL') || key.endsWith('_DB_URL')) {
+        let urlStr = env[key];
+        if (urlStr.startsWith('jdbc:')) {
+          urlStr = urlStr.substring(5);
+        }
+        const parsed = parseDatabaseUrl(urlStr, env);
+        if (parsed) {
+          if (!parsed.username && (env.DB_USERNAME || env.DB_USER || env.SPRING_DATASOURCE_USERNAME)) {
+            parsed.username = env.DB_USERNAME || env.DB_USER || env.SPRING_DATASOURCE_USERNAME;
+          }
+          if (!parsed.password && (env.DB_PASSWORD || env.DB_PASS || env.SPRING_DATASOURCE_PASSWORD)) {
+            parsed.password = env.DB_PASSWORD || env.DB_PASS || env.SPRING_DATASOURCE_PASSWORD;
+          }
+          configs.push(parsed);
+        }
+      }
+    }
+
+    // 2. Check for Laravel style DB_* variables
+    if (env.DB_CONNECTION || env.DB_HOST || env.DB_DATABASE) {
+      let type = env.DB_CONNECTION || 'mysql';
+      if (type === 'pgsql') { type = 'postgresql'; }
+
+      if (['mysql', 'mariadb', 'postgresql', 'sqlite'].includes(type)) {
+        if (type === 'sqlite') {
+          let fp = env.DB_DATABASE || env.DB_FILEPATH || 'database.sqlite';
+          if (!path.isAbsolute(fp)) {
+            fp = path.resolve(path.dirname(filePath), fp);
+          }
+          configs.push({
+            type: DatabaseType.SQLite,
+            database: fp,
+            filepath: fp,
+          });
+        } else {
+          configs.push({
+            type: type as DatabaseType,
+            host: env.DB_HOST || '127.0.0.1',
+            port: parseInt(env.DB_PORT || '', 10) || (type === 'postgresql' ? 5432 : 3306),
+            username: env.DB_USERNAME || env.DB_USER || 'root',
+            password: env.DB_PASSWORD || env.DB_PASS || '',
+            database: env.DB_DATABASE || env.DB_NAME || '',
+          });
+        }
+      }
+    }
+
+    // 3. Check for Django database variables if present
+    if (env.DB_ENGINE || env.DB_NAME) {
+      let engine = env.DB_ENGINE || '';
+      let type: string | null = null;
+      if (engine.includes('mysql')) { type = 'mysql'; }
+      else if (engine.includes('postgresql') || engine.includes('postgis')) { type = 'postgresql'; }
+      else if (engine.includes('sqlite')) { type = 'sqlite'; }
+
+      if (type) {
+        if (type === 'sqlite') {
+          let fp = env.DB_NAME || 'db.sqlite3';
+          if (!path.isAbsolute(fp)) {
+            fp = path.resolve(path.dirname(filePath), fp);
+          }
+          configs.push({
+            type: DatabaseType.SQLite,
+            database: fp,
+            filepath: fp,
+          });
+        } else {
+          configs.push({
+            type: type as DatabaseType,
+            host: env.DB_HOST || 'localhost',
+            port: parseInt(env.DB_PORT || '', 10) || (type === 'postgresql' ? 5432 : 3306),
+            username: env.DB_USER || 'root',
+            password: env.DB_PASSWORD || '',
+            database: env.DB_NAME || '',
+          });
+        }
+      }
+    }
+
+    // Deduplicate configs found within this file
+    const uniqueConfigs: Partial<ConnectionConfig>[] = [];
+    for (const c of configs) {
+      const exists = uniqueConfigs.some(
+        uc => uc.type === c.type &&
+              (uc.type === 'sqlite'
+                ? uc.filepath === c.filepath
+                : uc.host === c.host && uc.port === c.port && uc.database === c.database && uc.username === c.username)
+      );
+      if (!exists) {
+        uniqueConfigs.push(c);
+      }
+    }
+
+    return uniqueConfigs;
+  } catch (err) {
+    Logger.getInstance().logError(`Failed to detect configs in ${filePath}`, err);
+    return [];
+  }
+}
+
+async function scanWorkspaceForDatabaseConfigs() {
+  if (!vscode.workspace.workspaceFolders) {
+    return;
+  }
+
+  const savedConnections = await connectionManager.getSavedConnections();
+  let importedCount = 0;
+
+  for (const folder of vscode.workspace.workspaceFolders) {
+    const rootPath = folder.uri.fsPath;
+    const workspaceName = folder.name;
+
+    try {
+      const files = await glob('**/.env{,.local,.development,.production,.test}', {
+        cwd: rootPath,
+        absolute: true,
+        ignore: ['**/node_modules/**', '**/vendor/**', '**/.git/**', '**/dist/**', '**/build/**'],
+      });
+
+      for (const filePath of files) {
+        const detected = await detectDatabaseConfigsInFile(filePath, workspaceName);
+        for (const config of detected) {
+          // Check if this config already exists
+          const exists = savedConnections.some(
+            sc => sc.type === config.type &&
+                  (config.type === 'sqlite'
+                    ? sc.filepath === config.filepath
+                    : sc.host === config.host && sc.port === config.port && sc.database === config.database && sc.username === config.username)
+          );
+
+          if (!exists) {
+            const fileName = path.basename(filePath);
+            const dirName = path.basename(path.dirname(filePath));
+            const locationLabel = dirName === workspaceName ? fileName : `${dirName}/${fileName}`;
+            
+            const newConfig: ConnectionConfig = {
+              id: uuidv4(),
+              name: `${workspaceName} - ${config.database ? path.basename(config.database) : 'db'} (${config.type})`,
+              type: config.type as DatabaseType,
+              host: config.host || '',
+              port: config.port || 0,
+              username: config.username || '',
+              password: config.password || '',
+              database: config.database || '',
+              filepath: config.filepath || '',
+              ssl: { mode: SSLMode.Disabled },
+              ssh: { enabled: false, host: '', port: 22, username: '', authMethod: 'password' },
+              options: {},
+              group: `Imported (${workspaceName})`,
+              tags: ['auto-imported', workspaceName],
+              color: '',
+              createdAt: Date.now(),
+              updatedAt: Date.now()
+            };
+
+            await connectionManager.saveConnection(newConfig);
+            importedCount++;
+            Logger.getInstance().logInfo(`Auto-imported connection '${newConfig.name}' from ${locationLabel}`);
+          }
+        }
+      }
+    } catch (err) {
+      Logger.getInstance().logError(`Failed to scan workspace folder ${rootPath} for DB configs`, err);
+    }
+  }
+
+  if (importedCount > 0) {
+    vscode.window.showInformationMessage(`TablePro: Auto-imported ${importedCount} database connection(s) from .env files.`);
+    connectionTreeProvider.refresh();
+  }
+}
+
+  async function updateStatusBar() {
+    const editor = vscode.window.activeTextEditor;
+    if (editor && editor.document.languageId === 'sql') {
+      const uri = editor.document.uri.toString();
+      const mapped = queryDocContexts[uri];
+
+      let text = 'TablePro: Select DB';
+      if (mapped) {
+        text = `TablePro: ${mapped.connectionName} [${mapped.database || 'main'}]`;
+      } else {
+        const activeConnId = connectionManager.activeConnectionId;
+        if (activeConnId) {
+          const conn = connectionManager.activeConnection;
+          const connName = conn?.config.name || 'Connected';
+          const db = await getCurrentDatabaseName(activeConnId);
+          text = `TablePro: ${connName} [${db || 'main'}]`;
+
+          queryDocContexts[uri] = {
+            connectionId: activeConnId,
+            connectionName: connName,
+            database: db
+          };
+          await extensionContext.workspaceState.update('queryDocContexts', queryDocContexts);
+        }
+      }
+      queryContextStatusBarItem.text = text;
+      queryContextStatusBarItem.command = 'tablepro.changeQueryContext';
+      queryContextStatusBarItem.show();
+    } else {
+      queryContextStatusBarItem.hide();
+    }
+  }
+
+  async function applyQueryContext(doc: vscode.TextDocument): Promise<void> {
+    const uri = doc.uri.toString();
+    const mapped = queryDocContexts[uri];
+    if (mapped) {
+      if (!connectionManager.isConnected(mapped.connectionId)) {
+        try {
+          await connectionManager.connect(mapped.connectionId);
+        } catch (err) {
+          throw new Error(`TablePro: Connection "${mapped.connectionName}" is not active. Please connect first.`);
+        }
+      }
+      if (connectionManager.activeConnectionId !== mapped.connectionId) {
+        connectionManager.setActiveConnection(mapped.connectionId);
+      }
+      const driver = connectionManager.getDriver(mapped.connectionId);
+      const currentDb = driver ? await getCurrentDatabaseName(mapped.connectionId) : '';
+      if (driver && mapped.database && currentDb !== mapped.database) {
+        try {
+          await driver.switchDatabase(mapped.database);
+        } catch (err) {
+          // ignore SQLite unsupported errors
+        }
+      }
+      updateStatusBar();
+    } else {
+      const activeConnId = connectionManager.activeConnectionId;
+      if (activeConnId) {
+        const conn = connectionManager.activeConnection;
+        const connName = conn?.config.name || 'Connected';
+        const db = await getCurrentDatabaseName(activeConnId);
+        queryDocContexts[uri] = {
+          connectionId: activeConnId,
+          connectionName: connName,
+          database: db
+        };
+        await extensionContext.workspaceState.update('queryDocContexts', queryDocContexts);
+        updateStatusBar();
+      }
+    }
+  }
+
+export function deactivate() {
+  connectionManager?.dispose();
+  webviewManager?.disposeAll();
+  queryHistory?.dispose();
+}

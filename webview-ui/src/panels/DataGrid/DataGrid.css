@@ -1,0 +1,144 @@
+.datagrid { display: flex; flex-direction: column; height: 100vh; overflow: hidden; outline: none; }
+.datagrid-empty, .datagrid-message { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; gap: 8px; }
+.empty-icon, .message-icon { font-size: 48px; opacity: 0.5; margin-bottom: 8px; }
+.datagrid-empty h3, .datagrid-message h3 { font-size: 16px; font-weight: 600; margin: 0; }
+
+/* Toolbar */
+.datagrid-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 5px 10px; gap: 6px; border-bottom: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.08)); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); flex-shrink: 0; flex-wrap: wrap; }
+.toolbar-left { display: flex; align-items: center; gap: 8px; flex: 1; flex-wrap: wrap; }
+.toolbar-right { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.filter-input { width: 180px; padding: 3px 7px; font-size: 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.12)); border-radius: 3px; outline: none; }
+.filter-input:focus { border-color: var(--vscode-focusBorder); }
+.row-count { font-size: 11px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+.toolbar-btn { padding: 3px 7px; font-size: 11px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 1px solid transparent; border-radius: 3px; cursor: pointer; white-space: nowrap; }
+.toolbar-btn:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
+.toolbar-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.toolbar-btn.btn-active { border-color: var(--vscode-focusBorder); background: rgba(0,120,215,0.12); }
+.btn-save { background: var(--vscode-button-background) !important; color: var(--vscode-button-foreground) !important; font-weight: 600; }
+.btn-save:hover { background: var(--vscode-button-hoverBackground) !important; }
+.btn-discard { color: var(--vscode-errorForeground) !important; }
+.btn-preview { border-color: var(--vscode-focusBorder) !important; }
+.btn-quickview { background: var(--vscode-button-secondaryBackground); }
+.execution-time { font-size: 11px; color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family, monospace); }
+
+/* Where filter */
+.where-filter-group { display: flex; align-items: center; gap: 4px; background: rgba(0,120,215,0.08); border: 1px solid var(--vscode-focusBorder, #007acc); border-radius: 4px; padding: 2px 6px; }
+.where-label { font-size: 11px; font-weight: 600; color: var(--vscode-focusBorder, #007acc); white-space: nowrap; font-family: monospace; }
+.where-input { width: 280px; padding: 2px 6px; font-size: 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: none; border-radius: 2px; outline: none; font-family: monospace; }
+
+/* Change indicator badges */
+.change-indicator { display: flex; gap: 4px; margin-right: 4px; }
+.badge { padding: 2px 7px; border-radius: 8px; font-size: 10px; font-weight: 600; }
+.badge-modified { background: rgba(255, 165, 0, 0.2); color: #ffa500; }
+.badge-added { background: rgba(0, 200, 100, 0.2); color: #00c864; }
+.badge-deleted { background: rgba(255, 70, 70, 0.2); color: #ff4646; }
+
+/* Table */
+.datagrid-table-wrapper { flex: 1; overflow: auto; user-select: none; }
+.datagrid-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--vscode-editor-font-family, 'SF Mono', monospace); table-layout: auto; user-select: none; }
+.datagrid-table thead { position: sticky; top: 0; z-index: 10; }
+.datagrid-table th { background: var(--vscode-editorGroupHeader-tabsBackground, #252526); color: var(--vscode-foreground); padding: 5px 8px; text-align: left; font-weight: 600; font-size: 11px; white-space: nowrap; border-bottom: 2px solid var(--vscode-widget-border, rgba(255,255,255,0.08)); user-select: none; }
+.datagrid-table th.sorted-asc, .datagrid-table th.sorted-desc { background: rgba(0,120,215,0.15); }
+.col-name { display: flex; align-items: center; gap: 4px; }
+.pk-icon { font-size: 10px; }
+.col-type { display: block; font-size: 9px; font-weight: 400; color: var(--vscode-descriptionForeground); margin-top: 1px; font-family: monospace; opacity: 0.8; }
+.row-num-header { width: 44px; min-width: 44px; text-align: center; color: var(--vscode-descriptionForeground); }
+.row-actions-header { width: 80px; min-width: 80px; text-align: center; }
+
+/* Cells */
+.datagrid-table td { padding: 3px 8px; border-bottom: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.04)); white-space: nowrap; max-width: 400px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.datagrid-table tr:hover td { background: var(--vscode-list-hoverBackground); }
+.datagrid-table tr.selected td { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+.datagrid-table tr.multi-selected td { background: rgba(0,120,215,0.18) !important; }
+.cell-selected { outline: 2px solid var(--vscode-focusBorder, #007acc) !important; outline-offset: -2px; z-index: 1; position: relative; }
+.cell-selected-range { background: rgba(0, 120, 215, 0.15) !important; }
+.row-num { width: 44px; min-width: 44px; text-align: center; color: var(--vscode-editorLineNumber-foreground, #858585); font-size: 10px; user-select: none; cursor: pointer; }
+.row-num:hover { background: rgba(255,255,255,0.06) !important; }
+
+/* Cell states */
+.cell-null { color: var(--vscode-descriptionForeground); font-style: italic; }
+.cell-changed { background: rgba(255, 165, 0, 0.12) !important; border-left: 2px solid #ffa500 !important; }
+.null-value { color: var(--vscode-descriptionForeground); font-style: italic; opacity: 0.5; }
+.bool-value { font-weight: 500; }
+.json-value { color: var(--vscode-charts-yellow, #d7ba7d); font-size: 11px; }
+.cell-type-integer, .cell-type-float, .cell-type-decimal { text-align: right; color: var(--vscode-charts-green, #b5cea8); }
+.cell-type-date, .cell-type-datetime, .cell-type-time, .cell-type-timestamp { color: var(--vscode-charts-blue, #9cdcfe); }
+.cell-type-boolean { text-align: center; }
+
+/* Row states */
+.row-added td { background: rgba(0, 200, 100, 0.06) !important; }
+.row-added td:first-child { color: #00c864 !important; }
+.row-deleted td { background: rgba(255, 70, 70, 0.06) !important; text-decoration: line-through; opacity: 0.5; }
+
+/* Cell editor — full cell coverage, no padding */
+.cell-editor {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 22px;
+  padding: 0 2px;
+  margin: 0;
+  font-family: inherit;
+  font-size: inherit;
+  border: none;
+  border-radius: 0;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  outline: 2px solid var(--vscode-focusBorder);
+  box-sizing: border-box;
+  user-select: text;
+}
+.datagrid-table td.cell-editing {
+  padding: 0 !important;
+  overflow: visible;
+}
+
+/* Row actions */
+.row-actions { width: 80px; min-width: 80px; text-align: center; padding: 1px !important; opacity: 0; transition: opacity 0.12s; }
+tr:hover .row-actions, tr.selected .row-actions { opacity: 1; }
+.row-action-btn { background: none; border: none; cursor: pointer; padding: 1px 4px; font-size: 12px; color: var(--vscode-descriptionForeground); border-radius: 3px; }
+.row-action-btn:hover { background: var(--vscode-toolbar-hoverBackground); color: var(--vscode-foreground); }
+.row-action-delete:hover { color: var(--vscode-errorForeground) !important; }
+
+/* Pagination */
+.datagrid-pagination { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 5px 12px; border-top: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.08)); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); flex-shrink: 0; }
+.page-btn { padding: 2px 8px; font-size: 12px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 3px; cursor: pointer; min-width: 28px; }
+.page-btn:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
+.page-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.page-info { font-size: 11px; color: var(--vscode-descriptionForeground); min-width: 80px; text-align: center; }
+
+/* Context Menu */
+.context-menu {
+  position: fixed;
+  z-index: 9999;
+  background: var(--vscode-menu-background, #252526);
+  border: 1px solid var(--vscode-menu-border, #3c3c3c);
+  border-radius: 5px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  min-width: 180px;
+  padding: 4px 0;
+  font-size: 12px;
+  user-select: none;
+}
+.context-menu-item {
+  padding: 6px 14px;
+  cursor: pointer;
+  color: var(--vscode-menu-foreground, #cccccc);
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.context-menu-item:hover { background: var(--vscode-menu-selectionBackground, #04395e); color: var(--vscode-menu-selectionForeground, #fff); }
+.context-menu-danger { color: var(--vscode-errorForeground, #f48771) !important; }
+.context-menu-danger:hover { background: rgba(244,135,113,0.15) !important; }
+.context-menu-separator { height: 1px; background: var(--vscode-menu-separatorBackground, rgba(255,255,255,0.1)); margin: 3px 0; }
+
+/* Header controls */
+.column-header-th { position: relative; user-select: none; cursor: pointer; }
+.column-header-th:hover { background: var(--vscode-list-hoverBackground); }
+.header-content-wrapper { display: flex; align-items: center; justify-content: space-between; gap: 4px; width: 100%; }
+.sort-action-btn { background: none; border: none; cursor: pointer; font-size: 11px; color: var(--vscode-descriptionForeground); padding: 1px 3px; border-radius: 2px; opacity: 0.5; transition: opacity 0.1s; position: relative; }
+.sort-action-btn:hover { opacity: 1; background: rgba(255,255,255,0.1); }
+.column-header-th.sorted-asc .sort-action-btn, .column-header-th.sorted-desc .sort-action-btn { opacity: 1; color: var(--vscode-button-background, #007acc); }
+.sort-order { font-size: 8px; position: absolute; top: -2px; right: -3px; color: var(--vscode-button-background, #007acc); }
