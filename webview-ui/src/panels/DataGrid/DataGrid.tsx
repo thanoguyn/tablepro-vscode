@@ -61,6 +61,11 @@ interface GridLogEntry {
   message: string;
 }
 
+interface QuickViewState {
+  columns: ColumnHeader[];
+  rowData: unknown[];
+}
+
 const DEFAULT_PAGE_SIZE = 1000;
 
 function formatColumnType(col: ColumnHeader): string {
@@ -80,6 +85,19 @@ function formatColumnType(col: ColumnHeader): string {
     return `${base}(${col.precision})`;
   }
   return base;
+}
+
+function valueToText(value: unknown): string {
+  if (value === null || value === undefined) return 'NULL';
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+  }
+  const text = String(value);
+  const trimmed = text.trim();
+  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+    try { return JSON.stringify(JSON.parse(trimmed), null, 2); } catch {}
+  }
+  return text;
 }
 
 export default function DataGrid() {
@@ -111,10 +129,13 @@ export default function DataGrid() {
   const [logEntries, setLogEntries] = useState<GridLogEntry[]>([]);
   const [showLogDrawer, setShowLogDrawer] = useState(false);
   const [selectedLogId, setSelectedLogId] = useState<number | null>(null);
+  const [showQuickViewSidebar, setShowQuickViewSidebar] = useState(false);
+  const [quickViewData, setQuickViewData] = useState<QuickViewState | null>(null);
+  const [quickViewFilter, setQuickViewFilter] = useState('');
+  const [expandedQuickValue, setExpandedQuickValue] = useState<{ name: string; type: string; value: string } | null>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
   const csvMenuRef = useRef<HTMLDivElement>(null);
   const hasDeletedRef = useRef(false);
-  const quickViewOpenRef = useRef(false);
 
   function addLog(level: GridLogEntry['level'], message: string) {
     const entry: GridLogEntry = {
@@ -644,14 +665,11 @@ export default function DataGrid() {
   useEffect(() => {
     if (selectedRow >= 0 && selectedRow < pageRows.length) {
       const item = pageRows[selectedRow];
-      if (item && result) {
-        postMessage({
-          type: 'rowSelected',
-          data: { columns: result.columns, rowData: item.row.data }
-        });
+      if (item && result && showQuickViewSidebar) {
+        setQuickViewData({ columns: result.columns, rowData: item.row.data });
       }
     }
-  }, [selectedRow, pageRows, result]);
+  }, [selectedRow, pageRows, result, showQuickViewSidebar]);
 
   // ── Pagination ──
   const handleCountRows = useCallback(() => {
@@ -869,8 +887,8 @@ export default function DataGrid() {
     if (!result) return;
     const item = pageRows[visIdx];
     if (item) {
-      quickViewOpenRef.current = true;
-      postMessage({ type: 'openQuickView', data: { columns: result.columns, rowData: item.row.data } });
+      setQuickViewData({ columns: result.columns, rowData: item.row.data });
+      setShowQuickViewSidebar(true);
     }
   }, [result, pageRows]);
 
@@ -991,6 +1009,9 @@ export default function DataGrid() {
 
   const latestLog = logEntries[0];
   const selectedLog = logEntries.find(entry => entry.id === selectedLogId) || latestLog;
+  const quickFields = (quickViewData?.columns || [])
+    .map((col, idx) => ({ col, value: quickViewData?.rowData[idx], idx }))
+    .filter(item => item.col.name.toLowerCase().includes(quickViewFilter.toLowerCase()));
 
   return (
     <div className="datagrid" onKeyDown={handleKeyDown} tabIndex={0}>
@@ -1053,80 +1074,124 @@ export default function DataGrid() {
       </div>
 
       {/* Table */}
-      <div className="datagrid-table-wrapper">
-        <table className="datagrid-table">
-          <thead>
-            <tr>
-              <th className="row-num-header">#</th>
-              {result.columns.map((col, i) => {
-                const colSort = sortStates.find(s => s.column === i);
-                const sortOrder = sortStates.findIndex(s => s.column === i) + 1;
+      <div className="datagrid-main">
+        <div className="datagrid-table-wrapper">
+          <table className="datagrid-table">
+            <thead>
+              <tr>
+                <th className="row-num-header">#</th>
+                {result.columns.map((col, i) => {
+                  const colSort = sortStates.find(s => s.column === i);
+                  const sortOrder = sortStates.findIndex(s => s.column === i) + 1;
+                  return (
+                    <th key={i} className={`column-header-th ${colSort ? `sorted-${colSort.direction}` : ''}`}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={(e) => selectColumn(i)}
+                      title={`${col.name} (${col.type}) — Click to select column, Ctrl+click sort to multi-sort`}>
+                      <div className="header-content-wrapper">
+                        <span className="col-name">{col.isPrimaryKey && <span className="pk-icon">🔑</span>}{col.name}</span>
+                        <button className="sort-action-btn" onClick={(e) => toggleSort(i, e)} title="Sort (hold Ctrl for multi-sort)">
+                          {colSort ? (colSort.direction === 'asc' ? '▲' : '▼') : '↕'}
+                          {sortStates.length > 1 && colSort && <sup className="sort-order">{sortOrder}</sup>}
+                        </button>
+                      </div>
+                      <span className="col-type">{formatColumnType(col)}</span>
+                    </th>
+                  );
+                })}
+                <th className="row-actions-header">⋯</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pageRows.map((item, visIdx) => {
+                const absIdx = page * pageSize + visIdx;
+                const isRowSelected = selectedRows.has(visIdx);
+                const rowClass = `row-${item.row.status}${isRowSelected ? ' selected' : ''}${selectedRows.size > 1 && selectedRows.has(visIdx) ? ' multi-selected' : ''}`;
                 return (
-                  <th key={i} className={`column-header-th ${colSort ? `sorted-${colSort.direction}` : ''}`}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={(e) => selectColumn(i)}
-                    title={`${col.name} (${col.type}) — Click to select column, Ctrl+click sort to multi-sort`}>
-                    <div className="header-content-wrapper">
-                      <span className="col-name">{col.isPrimaryKey && <span className="pk-icon">🔑</span>}{col.name}</span>
-                      <button className="sort-action-btn" onClick={(e) => toggleSort(i, e)} title="Sort (hold Ctrl for multi-sort)">
-                        {colSort ? (colSort.direction === 'asc' ? '▲' : '▼') : '↕'}
-                        {sortStates.length > 1 && colSort && <sup className="sort-order">{sortOrder}</sup>}
-                      </button>
-                    </div>
-                    <span className="col-type">{formatColumnType(col)}</span>
-                  </th>
+                  <tr key={item.origIdx} className={rowClass}
+                    onClick={(e) => handleRowClick(visIdx, e)}
+                    onContextMenu={(e) => handleContextMenu(e, visIdx)}>
+                    <td className="row-num" onClick={(e) => { e.stopPropagation(); selectRowAllColumns(visIdx, e); }}>
+                      {item.row.status === 'added' ? '✦' : absIdx + 1}
+                    </td>
+                    {item.row.data.map((cell, ci) => {
+                      const isEditing = editingCell?.row === visIdx && editingCell?.col === ci;
+                      const isChanged = item.row.changedCols.has(ci);
+                      const isInSelection = isCellInRange(visIdx, ci);
+                      const isFocused = selectedRow === visIdx && selectedCol === ci;
+                      const cellClass = `cell${isFocused ? ' cell-selected' : ''}${isInSelection ? ' cell-selected-range' : ''}${cell === null ? ' cell-null' : ''}${isChanged ? ' cell-changed' : ''}${isEditing ? ' cell-editing' : ''} cell-type-${result.columns[ci]?.normalizedType || 'unknown'}`;
+                      return (
+                        <td key={ci} className={cellClass}
+                          onMouseDown={(e) => { if (!e.shiftKey) { setSelectedCol(ci); } handleCellMouseDown(visIdx, ci, e); }}
+                          onMouseEnter={() => handleCellMouseEnter(visIdx, ci)}
+                          onClick={(e) => e.stopPropagation()}
+                          onDoubleClick={() => startEdit(visIdx, ci)}
+                          title={cell === null ? 'NULL' : String(cell)}>
+                          {isEditing ? (
+                            <input ref={editInputRef} className="cell-editor" value={editValue}
+                              onChange={e => setEditValue(e.target.value)}
+                              onBlur={commitEdit}
+                              onKeyDown={e => {
+                                if (e.key === 'Escape') cancelEdit();
+                                else if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
+                              }} />
+                          ) : renderCell(cell, result.columns[ci])}
+                        </td>
+                      );
+                    })}
+                    <td className="row-actions">
+                      <button className="row-action-btn" onClick={e => { e.stopPropagation(); handleQuickView(visIdx); }} title="Quick View">👁</button>
+                      <button className="row-action-btn" onClick={e => { e.stopPropagation(); duplicateRow(visIdx); }} title="Duplicate">⧉</button>
+                      <button className="row-action-btn row-action-delete" onClick={e => { e.stopPropagation(); deleteRow(visIdx); }} title="Delete">✕</button>
+                    </td>
+                  </tr>
                 );
               })}
-              <th className="row-actions-header">⋯</th>
-            </tr>
-          </thead>
-          <tbody>
-            {pageRows.map((item, visIdx) => {
-              const absIdx = page * pageSize + visIdx;
-              const isRowSelected = selectedRows.has(visIdx);
-              const rowClass = `row-${item.row.status}${isRowSelected ? ' selected' : ''}${selectedRows.size > 1 && selectedRows.has(visIdx) ? ' multi-selected' : ''}`;
-              return (
-                <tr key={item.origIdx} className={rowClass}
-                  onClick={(e) => handleRowClick(visIdx, e)}
-                  onContextMenu={(e) => handleContextMenu(e, visIdx)}>
-                  <td className="row-num" onClick={(e) => { e.stopPropagation(); selectRowAllColumns(visIdx, e); }}>
-                    {item.row.status === 'added' ? '✦' : absIdx + 1}
-                  </td>
-                  {item.row.data.map((cell, ci) => {
-                    const isEditing = editingCell?.row === visIdx && editingCell?.col === ci;
-                    const isChanged = item.row.changedCols.has(ci);
-                    const isInSelection = isCellInRange(visIdx, ci);
-                    const isFocused = selectedRow === visIdx && selectedCol === ci;
-                    const cellClass = `cell${isFocused ? ' cell-selected' : ''}${isInSelection ? ' cell-selected-range' : ''}${cell === null ? ' cell-null' : ''}${isChanged ? ' cell-changed' : ''}${isEditing ? ' cell-editing' : ''} cell-type-${result.columns[ci]?.normalizedType || 'unknown'}`;
-                    return (
-                      <td key={ci} className={cellClass}
-                        onMouseDown={(e) => { if (!e.shiftKey) { setSelectedCol(ci); } handleCellMouseDown(visIdx, ci, e); }}
-                        onMouseEnter={() => handleCellMouseEnter(visIdx, ci)}
-                        onClick={(e) => e.stopPropagation()}
-                        onDoubleClick={() => startEdit(visIdx, ci)}
-                        title={cell === null ? 'NULL' : String(cell)}>
-                        {isEditing ? (
-                          <input ref={editInputRef} className="cell-editor" value={editValue}
-                            onChange={e => setEditValue(e.target.value)}
-                            onBlur={commitEdit}
-                            onKeyDown={e => {
-                              if (e.key === 'Escape') cancelEdit();
-                              else if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
-                            }} />
-                        ) : renderCell(cell, result.columns[ci])}
-                      </td>
-                    );
-                  })}
-                  <td className="row-actions">
-                    <button className="row-action-btn" onClick={e => { e.stopPropagation(); handleQuickView(visIdx); }} title="Quick View">👁</button>
-                    <button className="row-action-btn" onClick={e => { e.stopPropagation(); duplicateRow(visIdx); }} title="Duplicate">⧉</button>
-                    <button className="row-action-btn row-action-delete" onClick={e => { e.stopPropagation(); deleteRow(visIdx); }} title="Delete">✕</button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+            </tbody>
+          </table>
+        </div>
+
+        {showQuickViewSidebar && quickViewData && (
+          <aside className="datagrid-quickview-sidebar">
+            <div className="dqv-header">
+              <div>
+                <h2>Quick View</h2>
+                <span>{quickViewData.columns.length} fields</span>
+              </div>
+              <button onClick={() => setShowQuickViewSidebar(false)} title="Close Quick View">x</button>
+            </div>
+            <div className="dqv-search">
+              <input
+                value={quickViewFilter}
+                onChange={e => setQuickViewFilter(e.target.value)}
+                placeholder="Filter fields..."
+              />
+            </div>
+            <div className="dqv-list">
+              {quickFields.length === 0 ? (
+                <div className="dqv-empty">No matching fields</div>
+              ) : quickFields.map(({ col, value, idx }) => {
+                const text = valueToText(value);
+                return (
+                  <div key={`${col.name}-${idx}`} className={`dqv-field ${col.isPrimaryKey ? 'primary' : ''}`}>
+                    <div className="dqv-field-meta">
+                      <strong>{col.isPrimaryKey ? '🔑 ' : ''}{col.name}</strong>
+                      <span>{formatColumnType(col)}</span>
+                    </div>
+                    <button
+                      className={`dqv-value ${value === null || value === undefined ? 'null' : ''}`}
+                      onClick={() => setExpandedQuickValue({ name: col.name, type: formatColumnType(col), value: text })}
+                      title="Click to view full value"
+                    >
+                      {text}
+                    </button>
+                    <button className="dqv-copy" onClick={() => void writeClipboard(text, `Copied ${col.name}`)} title="Copy value">Copy</button>
+                  </div>
+                );
+              })}
+            </div>
+          </aside>
+        )}
       </div>
 
       {/* Context Menu */}
@@ -1203,6 +1268,23 @@ export default function DataGrid() {
               </div>
             </div>
           )}
+        </div>
+      )}
+      {expandedQuickValue && (
+        <div className="dqv-modal-backdrop" onClick={() => setExpandedQuickValue(null)}>
+          <div className="dqv-modal" onClick={e => e.stopPropagation()}>
+            <div className="dqv-modal-header">
+              <div>
+                <strong>{expandedQuickValue.name}</strong>
+                <span>{expandedQuickValue.type}</span>
+              </div>
+              <button onClick={() => setExpandedQuickValue(null)} title="Close">x</button>
+            </div>
+            <pre className="dqv-modal-content">{expandedQuickValue.value}</pre>
+            <div className="dqv-modal-actions">
+              <button onClick={() => void writeClipboard(expandedQuickValue.value, 'Copied full value')}>Copy</button>
+            </div>
+          </div>
         </div>
       )}
       {copyStatus && <div className={`datagrid-toast ${copyStatus.kind}`}>{copyStatus.text}</div>}
