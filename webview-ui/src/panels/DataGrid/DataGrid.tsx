@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { postMessage, onMessage } from '../../hooks/useVsCode';
+import { postMessage, onMessage, getState, setState } from '../../hooks/useVsCode';
 import './DataGrid.css';
 
 interface ColumnHeader {
@@ -43,6 +43,17 @@ interface RowState {
 
 interface SortState { column: number; direction: 'asc' | 'desc'; }
 
+type ColumnFilterOperator = 'like' | 'startsWith' | 'endsWith' | 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'empty' | 'notEmpty' | 'null' | 'notNull';
+
+interface ColumnFilterState {
+  operator: ColumnFilterOperator;
+  value: string;
+}
+
+interface GridPersistedState {
+  showColumnFilters?: boolean;
+}
+
 type UndoAction =
   | { type: 'edit'; rowIndex: number; colIndex: number; oldValue: unknown; newValue: unknown }
   | { type: 'addRow'; rowIndex: number }
@@ -71,7 +82,40 @@ interface QuickViewState {
   rowData: unknown[];
 }
 
+interface SqlPreviewState {
+  open: boolean;
+  loading: boolean;
+  sql: string;
+  count: number;
+  error?: string;
+}
+
 const DEFAULT_PAGE_SIZE = 1000;
+const DEFAULT_COLUMN_FILTER_OPERATOR: ColumnFilterOperator = 'like';
+const COLUMN_FILTER_OPERATORS: { value: ColumnFilterOperator; icon: string; label: string; needsValue: boolean }[] = [
+  { value: 'like', icon: '~', label: 'contains / LIKE', needsValue: true },
+  { value: 'startsWith', icon: '^', label: 'starts with', needsValue: true },
+  { value: 'endsWith', icon: '$', label: 'ends with', needsValue: true },
+  { value: 'eq', icon: '=', label: 'equals', needsValue: true },
+  { value: 'neq', icon: '!=', label: 'not equals', needsValue: true },
+  { value: 'gt', icon: '>', label: 'greater than', needsValue: true },
+  { value: 'gte', icon: '>=', label: 'greater than or equal', needsValue: true },
+  { value: 'lt', icon: '<', label: 'less than', needsValue: true },
+  { value: 'lte', icon: '<=', label: 'less than or equal', needsValue: true },
+  { value: 'empty', icon: '∅', label: 'empty string or null', needsValue: false },
+  { value: 'notEmpty', icon: '!∅', label: 'not empty', needsValue: false },
+  { value: 'null', icon: 'NULL', label: 'is null', needsValue: false },
+  { value: 'notNull', icon: '!NULL', label: 'is not null', needsValue: false },
+];
+
+function cloneRowState(row: RowState): RowState {
+  return {
+    status: row.status,
+    data: [...row.data],
+    original: [...row.original],
+    changedCols: new Set(row.changedCols),
+  };
+}
 
 function formatColumnType(col: ColumnHeader): string {
   if (!col) return '';
@@ -105,11 +149,83 @@ function valueToText(value: unknown): string {
   return text;
 }
 
+function isColumnFilterActive(filter?: ColumnFilterState): boolean {
+  if (!filter) return false;
+  const operator = filter.operator || DEFAULT_COLUMN_FILTER_OPERATOR;
+  if (operator === 'empty' || operator === 'notEmpty' || operator === 'null' || operator === 'notNull') return true;
+  return filter.value.trim() !== '';
+}
+
+function matchesColumnFilter(value: unknown, filter: ColumnFilterState, matchCase: boolean): boolean {
+  const operator = filter.operator || DEFAULT_COLUMN_FILTER_OPERATOR;
+  const isEmpty = value === null || value === undefined || String(value) === '';
+  if (operator === 'null') return value === null || value === undefined;
+  if (operator === 'notNull') return value !== null && value !== undefined;
+  if (operator === 'empty') return isEmpty;
+  if (operator === 'notEmpty') return !isEmpty;
+  if (isEmpty) return false;
+
+  const needleRaw = filter.value.trim();
+  if (!needleRaw) return true;
+  const valueText = String(value);
+  const haystack = matchCase ? valueText : valueText.toLowerCase();
+  const needle = matchCase ? needleRaw : needleRaw.toLowerCase();
+
+  switch (operator) {
+    case 'like': return haystack.includes(needle);
+    case 'startsWith': return haystack.startsWith(needle);
+    case 'endsWith': return haystack.endsWith(needle);
+    case 'eq': return haystack === needle;
+    case 'neq': return haystack !== needle;
+    case 'gt':
+    case 'gte':
+    case 'lt':
+    case 'lte': {
+      const valueNumber = typeof value === 'number' ? value : Number(valueText);
+      const needleNumber = Number(needleRaw);
+      if (!Number.isNaN(valueNumber) && !Number.isNaN(needleNumber)) {
+        if (operator === 'gt') return valueNumber > needleNumber;
+        if (operator === 'gte') return valueNumber >= needleNumber;
+        if (operator === 'lt') return valueNumber < needleNumber;
+        return valueNumber <= needleNumber;
+      }
+      const cmp = valueText.localeCompare(needleRaw, undefined, { numeric: true });
+      if (operator === 'gt') return cmp > 0;
+      if (operator === 'gte') return cmp >= 0;
+      if (operator === 'lt') return cmp < 0;
+      return cmp <= 0;
+    }
+    default:
+      return true;
+  }
+}
+
+function readPersistedGridState(): GridPersistedState {
+  try {
+    return getState<GridPersistedState>() || {};
+  } catch {
+    return {};
+  }
+}
+
+function columnFilterKey(filters: Record<number, ColumnFilterState>): string {
+  return Object.entries(filters)
+    .filter(([, filter]) => isColumnFilterActive(filter))
+    .map(([column, filter]) => `${column}:${filter.operator}:${filter.value.trim()}`)
+    .sort()
+    .join('|');
+}
+
 export default function DataGrid() {
   const [result, setResult] = useState<QueryResult | null>(null);
+  const [awaitingInitialResult, setAwaitingInitialResult] = useState(true);
   const [rows, setRows] = useState<RowState[]>([]);
   const [sortStates, setSortStates] = useState<SortState[]>([]);
   const [filterText, setFilterText] = useState('');
+  const [rowFilterApplying, setRowFilterApplying] = useState(false);
+  const [showColumnFilters, setShowColumnFilters] = useState(() => !!readPersistedGridState().showColumnFilters);
+  const [draftColumnFilters, setDraftColumnFilters] = useState<Record<number, ColumnFilterState>>({});
+  const [columnFilters, setColumnFilters] = useState<Record<number, ColumnFilterState>>({});
   const [whereFilter, setWhereFilter] = useState('');
   const [showWhereInput, setShowWhereInput] = useState(false);
   const [filterMatchCase, setFilterMatchCase] = useState(false);
@@ -143,6 +259,7 @@ export default function DataGrid() {
   const [quickViewFilter, setQuickViewFilter] = useState('');
   const [expandedQuickValue, setExpandedQuickValue] = useState<{ name: string; type: string; value: string } | null>(null);
   const [expandedLogQuery, setExpandedLogQuery] = useState<string | null>(null);
+  const [sqlPreview, setSqlPreview] = useState<SqlPreviewState>({ open: false, loading: false, sql: '', count: 0 });
   const [viewMode, setViewMode] = useState<GridViewMode>('table');
   const [ddlText, setDdlText] = useState('');
   const [ddlLoading, setDdlLoading] = useState(false);
@@ -151,6 +268,7 @@ export default function DataGrid() {
   const csvMenuRef = useRef<HTMLDivElement>(null);
   const tsvMenuRef = useRef<HTMLDivElement>(null);
   const hasDeletedRef = useRef(false);
+  const filterTextRef = useRef('');
   const escStateRef = useRef<{ target: 'filter' | 'quickview' | null; count: number; time: number }>({ target: null, count: 0, time: 0 });
 
   function addLog(level: GridLogEntry['level'], message: string, query?: string) {
@@ -172,17 +290,25 @@ export default function DataGrid() {
   }
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setFilterText(filterInput);
-      setPage(0);
-    }, 250);
-    return () => clearTimeout(timer);
-  }, [filterInput]);
+    try {
+      setState<GridPersistedState>({ showColumnFilters });
+    } catch {}
+  }, [showColumnFilters]);
+
+  useEffect(() => {
+    filterTextRef.current = filterText;
+  }, [filterText]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setAwaitingInitialResult(false), 1200);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     postMessage({ type: 'ready' });
     const unsub = onMessage((msg: any) => {
       if (msg.type === 'queryResult') {
+        setAwaitingInitialResult(false);
         const r = msg.data as QueryResult;
         setResult(r);
         setTableName(msg.tableName || '');
@@ -204,7 +330,11 @@ export default function DataGrid() {
         setHasMore(nextHasMore);
         setLoadingRows(nextLoadingRows);
         setFilterText('');
+        filterTextRef.current = '';
         setFilterInput('');
+        setRowFilterApplying(false);
+        setDraftColumnFilters({});
+        setColumnFilters({});
         setFilterMatchCase(false);
         setFilterUseRegex(false);
         setViewMode('table');
@@ -219,6 +349,7 @@ export default function DataGrid() {
           addLog('success', `Loaded ${r.rows.length.toLocaleString()} row${r.rows.length === 1 ? '' : 's'} in ${r.executionTime}ms`, msg.querySql);
         }
       } else if (msg.type === 'pageData') {
+        setAwaitingInitialResult(false);
         const r = msg.data as QueryResult;
         const nextPageSize = msg.pageSize || pageSize || DEFAULT_PAGE_SIZE;
         const nextHasMore = !!msg.hasMore;
@@ -238,6 +369,9 @@ export default function DataGrid() {
         if (msg.sortStates !== undefined) {
           setSortStates(msg.sortStates || []);
         }
+        if (filterTextRef.current) {
+          setRowFilterApplying(true);
+        }
         setSelectedRow(-1);
         setSelectedCol(-1);
         setSelectedRows(new Set());
@@ -255,7 +389,17 @@ export default function DataGrid() {
         setDdlText(msg.data.ddl || '');
         setDdlLoading(false);
         addLog('info', 'Loaded table DDL');
+      } else if (msg.type === 'previewSQLResult') {
+        const sql = msg.data?.sql || '';
+        const count = Number(msg.data?.count || 0);
+        setSqlPreview({ open: true, loading: false, sql, count });
+        addLog('info', count > 0 ? `Previewed ${count} SQL change${count === 1 ? '' : 's'}` : 'No SQL changes to preview', sql || undefined);
+      } else if (msg.type === 'previewSQLError') {
+        const error = msg.data?.message || 'Failed to preview SQL';
+        setSqlPreview({ open: true, loading: false, sql: '', count: 0, error });
+        addLog('error', error);
       } else if (msg.type === 'error') {
+        setAwaitingInitialResult(false);
         setDdlLoading(false);
         setLoadingRows(false);
         showStatus('error', msg.data?.message || 'Data grid error');
@@ -298,10 +442,22 @@ export default function DataGrid() {
 
   // Sort state for primary sort column (for backward compat)
   const sortState = sortStates.length > 0 ? sortStates[0] : null;
+  const activeColumnFilters = useMemo(
+    () => Object.entries(columnFilters)
+      .map(([column, filter]) => ({ column: Number(column), filter }))
+      .filter(({ filter }) => isColumnFilterActive(filter)),
+    [columnFilters],
+  );
+  const sqlColumnFilters = useMemo(() => activeColumnFilters.map(({ column, filter }) => ({
+    column,
+    operator: filter.operator,
+    value: filter.value,
+  })), [activeColumnFilters]);
+  const clientColumnFilters = tableName ? [] : activeColumnFilters;
 
   const filteredSortedIndices = useMemo(() => {
     const hasDeleted = hasDeletedRef.current;
-    if (!filterText && (!sortStates.length || tableName) && !hasDeleted) {
+    if (!filterText && clientColumnFilters.length === 0 && (!sortStates.length || tableName) && !hasDeleted) {
       return null;
     }
 
@@ -330,6 +486,12 @@ export default function DataGrid() {
       indices = indices.filter(idx => rows[idx].data.some(matcher));
     }
 
+    if (clientColumnFilters.length > 0) {
+      indices = indices.filter(idx => clientColumnFilters.every(({ column, filter }) =>
+        matchesColumnFilter(rows[idx].data[column], filter, filterMatchCase),
+      ));
+    }
+
     if (sortStates.length > 0 && !tableName) {
       indices.sort((a, b) => {
         for (const { column, direction } of sortStates) {
@@ -347,7 +509,7 @@ export default function DataGrid() {
     }
 
     return indices;
-  }, [rows, filterText, filterMatchCase, filterUseRegex, sortStates, tableName]);
+  }, [rows, filterText, filterMatchCase, filterUseRegex, clientColumnFilters, sortStates, tableName]);
 
   const visibleRowsCount = useMemo(() => {
     if (filteredSortedIndices !== null) {
@@ -355,6 +517,13 @@ export default function DataGrid() {
     }
     return rows.filter(r => r.status !== 'deleted').length;
   }, [rows, filteredSortedIndices]);
+  const activeColumnFilterCount = activeColumnFilters.length;
+
+  useEffect(() => {
+    if (!rowFilterApplying) return;
+    const timer = window.setTimeout(() => setRowFilterApplying(false), 120);
+    return () => window.clearTimeout(timer);
+  }, [rowFilterApplying, visibleRowsCount]);
 
   const totalPages = tableName
     ? (totalRows !== null ? Math.max(1, Math.ceil(totalRows / pageSize)) : null)
@@ -362,6 +531,9 @@ export default function DataGrid() {
 
   const pageRows = useMemo(() => {
     if (tableName) {
+      if (filteredSortedIndices !== null) {
+        return filteredSortedIndices.map(origIdx => ({ row: rows[origIdx], origIdx }));
+      }
       return rows.map((row, idx) => ({ row, origIdx: idx }));
     }
     const start = page * pageSize;
@@ -410,14 +582,14 @@ export default function DataGrid() {
     if (!item) { setEditingCell(null); return; }
     const colIdx = editingCell.col;
     const oldValue = item.row.data[colIdx];
-    let newValue: unknown = editValue === '' && result.columns[colIdx]?.nullable ? null : editValue;
+    let newValue: unknown = editValue;
 
     const ntype = result.columns[colIdx]?.normalizedType;
-    if (newValue !== null && (ntype === 'integer' || ntype === 'float' || ntype === 'decimal')) {
+    if (newValue !== '' && (ntype === 'integer' || ntype === 'float' || ntype === 'decimal')) {
       const num = Number(newValue);
       if (!isNaN(num)) newValue = num;
     }
-    if (ntype === 'boolean') {
+    if (newValue !== '' && ntype === 'boolean') {
       newValue = newValue === 'true' || newValue === '1' || newValue === true;
     }
 
@@ -471,22 +643,41 @@ export default function DataGrid() {
     setSelectedRow(0);
   }, [result, page, pageSize, rows, filteredSortedIndices, tableName, pushUndo]);
 
-  const deleteRow = useCallback((visIdx: number) => {
-    const item = pageRows[visIdx];
-    if (!item) return;
-    const origIdx = item.origIdx;
+  const deleteRows = useCallback((visIdxs: number[]) => {
+    const items = Array.from(new Set(visIdxs))
+      .map(visIdx => pageRows[visIdx])
+      .filter((item): item is { row: RowState; origIdx: number } => !!item)
+      .sort((a, b) => b.origIdx - a.origIdx);
+    if (items.length === 0) return;
+
     setRows(prev => {
       const next = [...prev];
-      pushUndo({ type: 'deleteRow', rowIndex: origIdx, row: { ...next[origIdx] } });
-      if (next[origIdx].status === 'added') {
-        next.splice(origIdx, 1);
-      } else {
-        next[origIdx] = { ...next[origIdx], status: 'deleted' };
-        hasDeletedRef.current = true;
+      const undoActions: UndoAction[] = [];
+
+      for (const item of items) {
+        const current = next[item.origIdx];
+        if (!current) continue;
+        undoActions.push({ type: 'deleteRow', rowIndex: item.origIdx, row: cloneRowState(current) });
+        if (current.status === 'added') {
+          next.splice(item.origIdx, 1);
+        } else {
+          next[item.origIdx] = { ...current, status: 'deleted' };
+          hasDeletedRef.current = true;
+        }
+      }
+
+      if (undoActions.length > 0) {
+        setUndoStack(prevUndo => [...prevUndo, ...undoActions]);
+        setRedoStack([]);
       }
       return next;
     });
-  }, [pageRows, pushUndo]);
+    setSelectedRows(new Set());
+  }, [pageRows]);
+
+  const deleteRow = useCallback((visIdx: number) => {
+    deleteRows([visIdx]);
+  }, [deleteRows]);
 
   const duplicateRow = useCallback((visIdx: number) => {
     const item = pageRows[visIdx];
@@ -592,6 +783,7 @@ export default function DataGrid() {
   }, []);
 
   const handlePreviewSQL = useCallback(() => {
+    setSqlPreview({ open: true, loading: true, sql: '', count: 0 });
     postMessage({ type: 'previewSQL', data: { rows: rows.map(r => ({ status: r.status, data: r.data, original: r.original, changedCols: Array.from(r.changedCols) })) } });
   }, [rows]);
 
@@ -600,19 +792,71 @@ export default function DataGrid() {
     if (tableName) {
       setTotalRows(null);
       setLoadingRows(true);
-      postMessage({ type: 'fetchPage', data: { page: 0, sortStates, whereFilter: whereFilter || undefined } });
+      if (filterText) setRowFilterApplying(true);
+      postMessage({ type: 'fetchPage', data: { page, sortStates, whereFilter: whereFilter || undefined, columnFilters: sqlColumnFilters } });
     } else {
       postMessage({ type: 'reload' });
     }
-  }, [tableName, sortStates, whereFilter]);
+  }, [tableName, page, sortStates, whereFilter, sqlColumnFilters, filterText]);
 
   // ── Where Filter ──
   const handleApplyWhere = useCallback(() => {
     if (tableName) {
       setLoadingRows(true);
-      postMessage({ type: 'fetchPage', data: { page: 0, sortStates, whereFilter: whereFilter || undefined } });
+      postMessage({ type: 'fetchPage', data: { page: 0, sortStates, whereFilter: whereFilter || undefined, columnFilters: sqlColumnFilters } });
     }
     setPage(0);
+  }, [tableName, sortStates, whereFilter, sqlColumnFilters]);
+
+  const applyRowFilter = useCallback(() => {
+    if (filterInput === filterText) return;
+    setRowFilterApplying(true);
+    setFilterText(filterInput);
+    filterTextRef.current = filterInput;
+    setPage(0);
+  }, [filterInput, filterText]);
+
+  const serializeSqlColumnFilters = useCallback((filters: Record<number, ColumnFilterState>) => Object.entries(filters)
+    .map(([column, filter]) => ({ column: Number(column), operator: filter.operator, value: filter.value }))
+    .filter(({ operator, value }) => isColumnFilterActive({ operator, value })), []);
+
+  const applyColumnFilter = useCallback((colIdx: number, filterOverride?: ColumnFilterState) => {
+    const nextFilter = filterOverride || draftColumnFilters[colIdx] || { operator: DEFAULT_COLUMN_FILTER_OPERATOR, value: '' };
+    const nextApplied = { ...columnFilters };
+    if (isColumnFilterActive(nextFilter)) nextApplied[colIdx] = nextFilter;
+    else delete nextApplied[colIdx];
+    const didChange = columnFilterKey(nextApplied) !== columnFilterKey(columnFilters);
+    if (!didChange) return;
+    const nextSqlFilters = serializeSqlColumnFilters(nextApplied);
+    setColumnFilters(nextApplied);
+    setPage(0);
+    if (tableName) {
+      setTotalRows(null);
+      setLoadingRows(true);
+      postMessage({ type: 'fetchPage', data: { page: 0, sortStates, whereFilter: whereFilter || undefined, columnFilters: nextSqlFilters } });
+    }
+  }, [columnFilters, draftColumnFilters, serializeSqlColumnFilters, tableName, sortStates, whereFilter]);
+
+  const updateColumnFilter = useCallback((colIdx: number, patch: Partial<ColumnFilterState>) => {
+    const current = draftColumnFilters[colIdx] || columnFilters[colIdx] || { operator: DEFAULT_COLUMN_FILTER_OPERATOR, value: '' };
+    const nextFilter = { ...current, ...patch };
+    setDraftColumnFilters(prev => ({ ...prev, [colIdx]: nextFilter }));
+    const currentMeta = COLUMN_FILTER_OPERATORS.find(op => op.value === current.operator);
+    const operatorMeta = COLUMN_FILTER_OPERATORS.find(op => op.value === nextFilter.operator);
+    if (operatorMeta?.needsValue === false || (patch.operator && currentMeta?.needsValue === false)) {
+      applyColumnFilter(colIdx, nextFilter);
+    }
+  }, [applyColumnFilter, columnFilters, draftColumnFilters]);
+
+  const clearColumnFilters = useCallback(() => {
+    setDraftColumnFilters({});
+    setColumnFilters({});
+    setPage(0);
+    if (tableName) {
+      setTotalRows(null);
+      setLoadingRows(true);
+      postMessage({ type: 'fetchPage', data: { page: 0, sortStates, whereFilter: whereFilter || undefined, columnFilters: [] } });
+    }
   }, [tableName, sortStates, whereFilter]);
 
   // ── Range Selection ──
@@ -624,6 +868,62 @@ export default function DataGrid() {
     const maxCol = Math.max(selectionStart.col, selectionEnd.col);
     return row >= minRow && row <= maxRow && col >= minCol && col <= maxCol;
   }, [selectionStart, selectionEnd]);
+
+  const getSelectionBounds = useCallback((fallbackVisIdx?: number, fallbackColIdx?: number) => {
+    if (selectionStart && selectionEnd) {
+      return {
+        startRow: Math.min(selectionStart.row, selectionEnd.row),
+        endRow: Math.max(selectionStart.row, selectionEnd.row),
+        startCol: Math.min(selectionStart.col, selectionEnd.col),
+        endCol: Math.max(selectionStart.col, selectionEnd.col),
+      };
+    }
+    if (fallbackVisIdx !== undefined && fallbackColIdx !== undefined) {
+      return { startRow: fallbackVisIdx, endRow: fallbackVisIdx, startCol: fallbackColIdx, endCol: fallbackColIdx };
+    }
+    if (selectedRow >= 0 && selectedCol >= 0) {
+      return { startRow: selectedRow, endRow: selectedRow, startCol: selectedCol, endCol: selectedCol };
+    }
+    return null;
+  }, [selectionStart, selectionEnd, selectedRow, selectedCol]);
+
+  const setCellsToNull = useCallback((fallbackVisIdx?: number, fallbackColIdx?: number) => {
+    if (!result) return;
+    const bounds = getSelectionBounds(fallbackVisIdx, fallbackColIdx);
+    if (!bounds) return;
+
+    setRows(prev => {
+      const next = [...prev];
+      const undoActions: UndoAction[] = [];
+
+      for (let r = bounds.startRow; r <= bounds.endRow; r++) {
+        const item = pageRows[r];
+        if (!item) continue;
+        const rowState = { ...next[item.origIdx], data: [...next[item.origIdx].data], changedCols: new Set(next[item.origIdx].changedCols) };
+
+        for (let c = bounds.startCol; c <= bounds.endCol; c++) {
+          if (!result.columns[c]?.nullable) continue;
+          const oldValue = rowState.data[c];
+          if (oldValue === null) continue;
+          undoActions.push({ type: 'edit', rowIndex: item.origIdx, colIndex: c, oldValue, newValue: null });
+          rowState.data[c] = null;
+          if (rowState.status !== 'added') {
+            if (rowState.original[c] === null) rowState.changedCols.delete(c);
+            else rowState.changedCols.add(c);
+            rowState.status = rowState.changedCols.size > 0 ? 'modified' : 'unchanged';
+          }
+        }
+
+        next[item.origIdx] = rowState;
+      }
+
+      if (undoActions.length > 0) {
+        setUndoStack(prevUndo => [...prevUndo, ...undoActions]);
+        setRedoStack([]);
+      }
+      return next;
+    });
+  }, [result, pageRows, getSelectionBounds]);
 
   const selectColumn = useCallback((colIdx: number) => {
     if (!result) return;
@@ -727,17 +1027,18 @@ export default function DataGrid() {
 
   // ── Pagination ──
   const handleCountRows = useCallback(() => {
-    if (tableName) postMessage({ type: 'countRows', data: { whereFilter: whereFilter || undefined } });
-  }, [tableName, whereFilter]);
+    if (tableName) postMessage({ type: 'countRows', data: { whereFilter: whereFilter || undefined, columnFilters: sqlColumnFilters } });
+  }, [tableName, whereFilter, sqlColumnFilters]);
 
   const handlePageChange = useCallback((nextPage: number) => {
     if (tableName) {
       setLoadingRows(true);
-      postMessage({ type: 'fetchPage', data: { page: nextPage, sortStates, whereFilter: whereFilter || undefined } });
+      if (filterText) setRowFilterApplying(true);
+      postMessage({ type: 'fetchPage', data: { page: nextPage, sortStates, whereFilter: whereFilter || undefined, columnFilters: sqlColumnFilters } });
     } else {
       setPage(nextPage);
     }
-  }, [tableName, sortStates, whereFilter]);
+  }, [tableName, sortStates, whereFilter, sqlColumnFilters, filterText]);
 
   // ── Multi-Sort ──
   const toggleSort = useCallback((colIdx: number, e: React.MouseEvent) => {
@@ -775,12 +1076,13 @@ export default function DataGrid() {
 
       if (tableName) {
         setLoadingRows(true);
-        postMessage({ type: 'fetchPage', data: { page: 0, sortStates: next, whereFilter: whereFilter || undefined } });
+        if (filterText) setRowFilterApplying(true);
+        postMessage({ type: 'fetchPage', data: { page: 0, sortStates: next, whereFilter: whereFilter || undefined, columnFilters: sqlColumnFilters } });
       }
       return next;
     });
     setPage(0);
-  }, [tableName, whereFilter]);
+  }, [tableName, whereFilter, sqlColumnFilters, filterText]);
 
   // ── Paste ──
   const pasteData = useCallback((text: string) => {
@@ -788,41 +1090,87 @@ export default function DataGrid() {
     const lines = text.split(/\r?\n/);
     if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
     const gridData = lines.map(line => line.split('\t'));
+    const bounds = getSelectionBounds(selectedRow, selectedCol);
+    const fillRangeWithSingleCell = gridData.length === 1
+      && gridData[0].length === 1
+      && bounds !== null
+      && (bounds.startRow !== bounds.endRow || bounds.startCol !== bounds.endCol);
+
+    const parsePastedValue = (valStr: string, colIdx: number): unknown => {
+      let newValue: unknown = valStr === 'NULL' ? null : valStr;
+      const ntype = result.columns[colIdx]?.normalizedType;
+      if (newValue !== null && newValue !== '' && (ntype === 'integer' || ntype === 'float' || ntype === 'decimal')) {
+        const num = Number(newValue);
+        if (!isNaN(num)) newValue = num;
+      }
+      if (newValue !== null && newValue !== '' && ntype === 'boolean') {
+        newValue = newValue === 'true' || newValue === '1';
+      }
+      return newValue;
+    };
 
     setRows(prev => {
       const next = [...prev];
-      for (let r = 0; r < gridData.length; r++) {
-        const visRowIdx = selectedRow + r;
-        if (visRowIdx >= pageRows.length) break;
-        const item = pageRows[visRowIdx];
-        const origIdx = item.origIdx;
-        const rState = { ...next[origIdx], data: [...next[origIdx].data], changedCols: new Set(next[origIdx].changedCols) };
-        for (let c = 0; c < gridData[r].length; c++) {
-          const colIdx = selectedCol + c;
-          if (colIdx >= result.columns.length) break;
-          const valStr = gridData[r][c];
-          let newValue: any = valStr === 'NULL' || (valStr === '' && result.columns[colIdx]?.nullable) ? null : valStr;
-          const ntype = result.columns[colIdx]?.normalizedType;
-          if (newValue !== null && (ntype === 'integer' || ntype === 'float' || ntype === 'decimal')) {
-            const num = Number(newValue); if (!isNaN(num)) newValue = num;
-          }
-          if (ntype === 'boolean') newValue = newValue === 'true' || newValue === '1';
-          const oldValue = rState.data[colIdx];
-          if (oldValue !== newValue) {
-            pushUndo({ type: 'edit', rowIndex: origIdx, colIndex: colIdx, oldValue, newValue });
-            rState.data[colIdx] = newValue;
-            if (rState.status !== 'added') {
-              if (newValue === rState.original[colIdx]) rState.changedCols.delete(colIdx);
-              else rState.changedCols.add(colIdx);
-              rState.status = rState.changedCols.size > 0 ? 'modified' : 'unchanged';
+      const undoActions: UndoAction[] = [];
+
+      if (fillRangeWithSingleCell && bounds) {
+        const valStr = gridData[0][0];
+        for (let visRowIdx = bounds.startRow; visRowIdx <= bounds.endRow; visRowIdx++) {
+          const item = pageRows[visRowIdx];
+          if (!item) continue;
+          const origIdx = item.origIdx;
+          const rState = { ...next[origIdx], data: [...next[origIdx].data], changedCols: new Set(next[origIdx].changedCols) };
+          for (let colIdx = bounds.startCol; colIdx <= bounds.endCol; colIdx++) {
+            if (colIdx >= result.columns.length) break;
+            const newValue = parsePastedValue(valStr, colIdx);
+            const oldValue = rState.data[colIdx];
+            if (oldValue !== newValue) {
+              undoActions.push({ type: 'edit', rowIndex: origIdx, colIndex: colIdx, oldValue, newValue });
+              rState.data[colIdx] = newValue;
+              if (rState.status !== 'added') {
+                if (newValue === rState.original[colIdx]) rState.changedCols.delete(colIdx);
+                else rState.changedCols.add(colIdx);
+                rState.status = rState.changedCols.size > 0 ? 'modified' : 'unchanged';
+              }
             }
           }
+          next[origIdx] = rState;
         }
-        next[origIdx] = rState;
+      } else {
+        for (let r = 0; r < gridData.length; r++) {
+          const visRowIdx = selectedRow + r;
+          if (visRowIdx >= pageRows.length) break;
+          const item = pageRows[visRowIdx];
+          if (!item) continue;
+          const origIdx = item.origIdx;
+          const rState = { ...next[origIdx], data: [...next[origIdx].data], changedCols: new Set(next[origIdx].changedCols) };
+          for (let c = 0; c < gridData[r].length; c++) {
+            const colIdx = selectedCol + c;
+            if (colIdx >= result.columns.length) break;
+            const valStr = gridData[r][c];
+            const newValue = parsePastedValue(valStr, colIdx);
+            const oldValue = rState.data[colIdx];
+            if (oldValue !== newValue) {
+              undoActions.push({ type: 'edit', rowIndex: origIdx, colIndex: colIdx, oldValue, newValue });
+              rState.data[colIdx] = newValue;
+              if (rState.status !== 'added') {
+                if (newValue === rState.original[colIdx]) rState.changedCols.delete(colIdx);
+                else rState.changedCols.add(colIdx);
+                rState.status = rState.changedCols.size > 0 ? 'modified' : 'unchanged';
+              }
+            }
+          }
+          next[origIdx] = rState;
+        }
+      }
+
+      if (undoActions.length > 0) {
+        setUndoStack(prevUndo => [...prevUndo, ...undoActions]);
+        setRedoStack([]);
       }
       return next;
     });
-  }, [result, pageRows, selectedRow, selectedCol, pushUndo]);
+  }, [result, pageRows, selectedRow, selectedCol, getSelectionBounds]);
 
   // ── Context Menu ──
   const handleContextMenu = useCallback((e: React.MouseEvent, visIdx: number, colIdx?: number) => {
@@ -879,35 +1227,31 @@ export default function DataGrid() {
 
   const getSelectionText = useCallback((fallbackVisIdx?: number, fallbackColIdx?: number) => {
     if (!result) return '';
-
-    const hasRange = selectionStart && selectionEnd;
-    const startRow = hasRange ? Math.min(selectionStart!.row, selectionEnd!.row) : fallbackVisIdx;
-    const endRow = hasRange ? Math.max(selectionStart!.row, selectionEnd!.row) : fallbackVisIdx;
-    const startCol = hasRange ? Math.min(selectionStart!.col, selectionEnd!.col) : fallbackColIdx;
-    const endCol = hasRange ? Math.max(selectionStart!.col, selectionEnd!.col) : fallbackColIdx;
-
-    if (startRow === undefined || endRow === undefined || startCol === undefined || endCol === undefined) {
+    const bounds = getSelectionBounds(fallbackVisIdx, fallbackColIdx);
+    if (!bounds) {
       return '';
     }
 
     const lines: string[] = [];
-    for (let r = startRow; r <= endRow; r++) {
+    for (let r = bounds.startRow; r <= bounds.endRow; r++) {
       const rowCells: string[] = [];
-      for (let c = startCol; c <= endCol; c++) {
+      for (let c = bounds.startCol; c <= bounds.endCol; c++) {
         const cellVal = pageRows[r]?.row.data[c];
         rowCells.push(cellVal === null || cellVal === undefined ? '' : String(cellVal));
       }
       lines.push(rowCells.join('\t'));
     }
     return lines.join('\n');
-  }, [result, selectionStart, selectionEnd, pageRows]);
+  }, [result, pageRows, getSelectionBounds]);
 
   const copySelection = useCallback((fallbackVisIdx?: number, fallbackColIdx?: number) => {
+    const bounds = getSelectionBounds(fallbackVisIdx, fallbackColIdx);
+    if (!bounds) return null;
     const text = getSelectionText(fallbackVisIdx, fallbackColIdx);
-    if (!text) return;
-    const isRange = !!selectionStart && !!selectionEnd && (selectionStart.row !== selectionEnd.row || selectionStart.col !== selectionEnd.col);
+    const isRange = bounds.startRow !== bounds.endRow || bounds.startCol !== bounds.endCol;
     void writeClipboard(text, isRange ? 'Copied range' : 'Copied cell');
-  }, [getSelectionText, selectionStart, selectionEnd, writeClipboard]);
+    return text;
+  }, [getSelectionBounds, getSelectionText, writeClipboard]);
 
   const getAllClientRowsForCopy = useCallback(() => {
     if (filteredSortedIndices !== null) {
@@ -991,6 +1335,7 @@ export default function DataGrid() {
           includeHeader,
           sortStates,
           whereFilter: whereFilter || undefined,
+          columnFilters: sqlColumnFilters,
         },
       });
       return;
@@ -999,7 +1344,7 @@ export default function DataGrid() {
     const items = scope === 'all' ? getAllClientRowsForCopy() : pageRows;
     const text = buildDelimited(items, includeHeader, format);
     void writeClipboard(text, scope === 'all' ? `Copied all rows as ${label}` : `Copied current page as ${label}`);
-  }, [result, tableName, sortStates, whereFilter, getAllClientRowsForCopy, pageRows, buildDelimited, writeClipboard]);
+  }, [result, tableName, sortStates, whereFilter, sqlColumnFilters, getAllClientRowsForCopy, pageRows, buildDelimited, writeClipboard]);
 
   // ── Quick View ──
   const handleQuickView = useCallback((visIdx: number) => {
@@ -1041,8 +1386,13 @@ export default function DataGrid() {
       else if (e.key === 'Tab') { e.preventDefault(); commitEdit(); }
       return;
     }
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('input, textarea, select, [contenteditable="true"]')) {
+      return;
+    }
     if (!result) return;
-    switch (e.key) {
+    const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    switch (key) {
       case 'Escape':
         if (showWhereInput) {
           e.preventDefault();
@@ -1104,17 +1454,12 @@ export default function DataGrid() {
       }
       case 'Enter': case 'F2': if (selectedRow >= 0 && selectedCol >= 0) startEdit(selectedRow, selectedCol); break;
       case 'Delete': case 'Backspace':
-        if (selectedRow >= 0 && selectedCol >= 0 && !editingCell) {
-          const item = pageRows[selectedRow];
-          if (item && result.columns[selectedCol]?.nullable) {
-            pushUndo({ type: 'edit', rowIndex: item.origIdx, colIndex: selectedCol, oldValue: item.row.data[selectedCol], newValue: null });
-            setRows(prev => {
-              const n = [...prev]; const r = { ...n[item.origIdx], data: [...n[item.origIdx].data], changedCols: new Set(n[item.origIdx].changedCols) };
-              r.data[selectedCol] = null;
-              if (r.status !== 'added') { r.changedCols.add(selectedCol); r.status = 'modified'; }
-              n[item.origIdx] = r; return n;
-            });
-          }
+        if (selectedRows.size > 0) {
+          e.preventDefault();
+          deleteRows(Array.from(selectedRows));
+        } else if (selectedRow >= 0 && selectedCol >= 0 && !editingCell) {
+          e.preventDefault();
+          setCellsToNull(selectedRow, selectedCol);
         }
         break;
       case 'z': if (e.metaKey || e.ctrlKey) { e.preventDefault(); if (e.shiftKey) redo(); else undo(); } break;
@@ -1134,7 +1479,7 @@ export default function DataGrid() {
         }
         break;
     }
-  }, [editingCell, result, showWhereInput, showQuickViewSidebar, selectedRow, selectedCol, pageRows, startEdit, commitEdit, cancelEdit, undo, redo, pushUndo, pasteData, handleReload, copySelection, closeAfterSecondEsc]);
+  }, [editingCell, result, showWhereInput, showQuickViewSidebar, selectedRow, selectedCol, selectedRows, pageRows, startEdit, commitEdit, cancelEdit, undo, redo, pasteData, handleReload, copySelection, closeAfterSecondEsc, deleteRows, setCellsToNull]);
 
   useEffect(() => {
     const handleGlobalKeyDown = (event: KeyboardEvent) => {
@@ -1142,7 +1487,7 @@ export default function DataGrid() {
         return;
       }
       const target = event.target as HTMLElement | null;
-      if (target?.closest('input, textarea, [contenteditable="true"]')) {
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) {
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c' && selectedRow >= 0 && selectedCol >= 0) {
@@ -1150,12 +1495,41 @@ export default function DataGrid() {
         copySelection(selectedRow, selectedCol);
       }
     };
+    const handleNativeCopy = (event: ClipboardEvent) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) {
+        return;
+      }
+      const bounds = getSelectionBounds(selectedRow, selectedCol);
+      if (!bounds || !event.clipboardData) {
+        return;
+      }
+      const text = getSelectionText(selectedRow, selectedCol);
+      event.clipboardData.setData('text/plain', text);
+      event.preventDefault();
+    };
     window.addEventListener('keydown', handleGlobalKeyDown);
-    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [selectedRow, selectedCol, copySelection]);
+    window.addEventListener('copy', handleNativeCopy);
+    return () => {
+      window.removeEventListener('keydown', handleGlobalKeyDown);
+      window.removeEventListener('copy', handleNativeCopy);
+    };
+  }, [selectedRow, selectedCol, copySelection, getSelectionBounds, getSelectionText]);
 
+  if (!result && awaitingInitialResult) {
+    return (
+      <div className="datagrid-empty">
+        <span className="loading-spinner" />
+        <h3>Loading...</h3>
+        <p className="text-muted">Preparing data grid</p>
+      </div>
+    );
+  }
   if (!result) return <div className="datagrid-empty"><div className="empty-icon">📊</div><h3>No Results</h3><p className="text-muted">Run a query to see results here</p></div>;
-  if (result.columns.length === 0) return <div className="datagrid-message"><div className="message-icon">✅</div><h3>{result.affectedRows} rows affected</h3><p className="text-muted">{result.executionTime}ms</p></div>;
+  if (result.columns.length === 0 && !loadingRows) return <div className="datagrid-message"><div className="message-icon">✅</div><h3>{result.affectedRows} rows affected</h3><p className="text-muted">{result.executionTime}ms</p></div>;
 
   const latestLog = logEntries[0];
   const selectedLog = logEntries.find(entry => entry.id === selectedLogId) || latestLog;
@@ -1178,6 +1552,16 @@ export default function DataGrid() {
               placeholder="Filter rows..."
               value={filterInput}
               onChange={e => setFilterInput(e.target.value)}
+              onBlur={applyRowFilter}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  applyRowFilter();
+                }
+                if (e.key === 'Escape') {
+                  setFilterInput(filterText);
+                }
+              }}
             />
             <div className="filter-mode-actions">
               <button
@@ -1219,7 +1603,9 @@ export default function DataGrid() {
               <button className="toolbar-btn icon-btn" onClick={() => { setWhereFilter(''); setShowWhereInput(false); handleApplyWhere(); }} title="Clear WHERE filter">✕</button>
             </div>
           )}
-          <span className="row-count">{visibleRowsCount.toLocaleString()} rows</span>
+          <span className="row-count">
+            {rowFilterApplying ? 'Đang tìm kiếm trên trang hiện tại...' : `${visibleRowsCount.toLocaleString()} rows`}
+          </span>
         </div>
         <div className="toolbar-right">
           {hasChanges && (
@@ -1258,7 +1644,7 @@ export default function DataGrid() {
           <button className="toolbar-btn icon-btn" onClick={undo} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">↩</button>
           <button className="toolbar-btn icon-btn" onClick={redo} disabled={redoStack.length === 0} title="Redo (Ctrl+Shift+Z)">↪</button>
           {hasChanges && <>
-            <button className="toolbar-btn icon-btn btn-preview" onClick={handlePreviewSQL} title="Preview SQL">👁</button>
+            <button className="toolbar-btn icon-btn btn-preview sql-preview-btn" onClick={handlePreviewSQL} title="Preview SQL">{'</>'}</button>
             <button className="toolbar-btn icon-btn btn-discard" onClick={handleDiscard} title="Discard Changes">✕</button>
             <button className="toolbar-btn icon-btn btn-save" onClick={handleSave} title="Save Changes">💾</button>
           </>}
@@ -1283,7 +1669,22 @@ export default function DataGrid() {
             <table className="datagrid-table">
               <thead>
                 <tr>
-                  <th className="row-num-header">#</th>
+                  <th className="row-num-header">
+                    <div className="row-num-header-inner">
+                      <span>#</span>
+                      <button
+                        type="button"
+                        className={`column-filter-toggle ${showColumnFilters ? 'active' : ''}`}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setShowColumnFilters(v => !v);
+                        }}
+                        title="Column filters"
+                      >
+                        ⌕
+                      </button>
+                    </div>
+                  </th>
                   {result.columns.map((col, i) => {
                     const colSort = sortStates.find(s => s.column === i);
                     const sortOrder = sortStates.findIndex(s => s.column === i) + 1;
@@ -1305,9 +1706,66 @@ export default function DataGrid() {
                   })}
                   <th className="row-actions-header">⋯</th>
                 </tr>
+                {showColumnFilters && (
+                  <tr className="column-filter-row">
+                    <th className="row-num-header">
+                      <button
+                        type="button"
+                        className={`column-filter-clear ${activeColumnFilterCount > 0 ? 'active' : ''}`}
+                        onClick={e => {
+                          e.stopPropagation();
+                          clearColumnFilters();
+                        }}
+                        title="Clear column filters"
+                      >
+                        ✕
+                        {activeColumnFilterCount > 0 && <span className="column-filter-badge">{activeColumnFilterCount}</span>}
+                      </button>
+                    </th>
+                    {result.columns.map((col, i) => {
+                      const filter = draftColumnFilters[i] || columnFilters[i] || { operator: DEFAULT_COLUMN_FILTER_OPERATOR, value: '' };
+                      const operatorMeta = COLUMN_FILTER_OPERATORS.find(op => op.value === filter.operator);
+                      const applied = isColumnFilterActive(columnFilters[i]);
+                      return (
+                        <th key={`filter-${i}`} className={`column-filter-cell ${applied ? 'active' : ''}`} onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
+                          <div className="column-filter-control">
+                            <span className="column-filter-operator-wrap">
+                              <span className="column-filter-operator-icon" aria-hidden="true">{operatorMeta?.icon || '~'}</span>
+                              <select
+                                className="column-filter-operator"
+                                value={filter.operator}
+                                onChange={e => updateColumnFilter(i, { operator: e.target.value as ColumnFilterOperator })}
+                                title={`Filter ${col.name} operator`}
+                              >
+                                {COLUMN_FILTER_OPERATORS.map(op => (
+                                  <option key={op.value} value={op.value}>{op.icon} {op.label}</option>
+                                ))}
+                              </select>
+                            </span>
+                            <input
+                              value={filter.value}
+                              disabled={operatorMeta?.needsValue === false}
+                              onChange={e => updateColumnFilter(i, { value: e.target.value })}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  applyColumnFilter(i);
+                                }
+                              }}
+                              onBlur={() => applyColumnFilter(i)}
+                              placeholder={operatorMeta?.needsValue === false ? '' : col.name}
+                              title={`Filter ${col.name}`}
+                            />
+                          </div>
+                        </th>
+                      );
+                    })}
+                    <th className="row-actions-header" />
+                  </tr>
+                )}
               </thead>
               <tbody>
-                {loadingRows ? (
+                {loadingRows && pageRows.length === 0 ? (
                   <tr>
                     <td className="loading-row" colSpan={result.columns.length + 2}>
                       <span className="loading-spinner" />
@@ -1367,6 +1825,14 @@ export default function DataGrid() {
                 })}
               </tbody>
             </table>
+            {loadingRows && pageRows.length > 0 && (
+              <div className="datagrid-loading-overlay">
+                <div className="datagrid-loading-pill">
+                  <span className="loading-spinner" />
+                  Loading rows...
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -1552,6 +2018,37 @@ export default function DataGrid() {
             <pre className="dqv-modal-content">{expandedQuickValue.value}</pre>
             <div className="dqv-modal-actions">
               <button onClick={() => void writeClipboard(expandedQuickValue.value, 'Copied full value')}>Copy</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {sqlPreview.open && (
+        <div className="dqv-modal-backdrop" onClick={() => setSqlPreview(prev => ({ ...prev, open: false }))}>
+          <div className="query-modal" onClick={e => e.stopPropagation()}>
+            <div className="dqv-modal-header">
+              <div>
+                <strong>Preview SQL</strong>
+                <span>{sqlPreview.loading ? 'Generating...' : `${sqlPreview.count} change${sqlPreview.count === 1 ? '' : 's'}`}</span>
+              </div>
+              <button onClick={() => setSqlPreview(prev => ({ ...prev, open: false }))} title="Close">x</button>
+            </div>
+            {sqlPreview.loading ? (
+              <div className="sql-preview-loading">
+                <span className="loading-spinner" />
+                Generating SQL preview...
+              </div>
+            ) : sqlPreview.error ? (
+              <pre className="dqv-modal-content sql-preview-error">{sqlPreview.error}</pre>
+            ) : (
+              <pre className="dqv-modal-content">{sqlPreview.sql || 'No changes to preview.'}</pre>
+            )}
+            <div className="dqv-modal-actions">
+              <button
+                disabled={sqlPreview.loading || !sqlPreview.sql}
+                onClick={() => void writeClipboard(sqlPreview.sql, 'Copied SQL preview')}
+              >
+                Copy
+              </button>
             </div>
           </div>
         </div>

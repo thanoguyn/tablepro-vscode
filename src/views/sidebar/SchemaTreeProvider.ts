@@ -150,6 +150,19 @@ export class SchemaTreeProvider implements vscode.TreeDataProvider<SchemaTreeIte
     return element;
   }
 
+  async findTableItem(tableName: string, connectionId: string, schema?: string): Promise<SchemaTreeItem | undefined> {
+    const groups = await this.getTableGroups(connectionId, schema);
+    for (const group of groups) {
+      if (group instanceof TableGroupItem) {
+        const table = group.tables.find(t => t.name === tableName && (t.schema || '') === (schema || ''));
+        if (table) {
+          return new TableItem(table, connectionId);
+        }
+      }
+    }
+    return undefined;
+  }
+
   async getChildren(element?: SchemaTreeItem): Promise<SchemaTreeItem[]> {
     const conn = this.connectionManager.activeConnection;
     if (!conn) { return []; }

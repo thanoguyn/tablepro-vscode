@@ -27,6 +27,7 @@ import {
   SSLMode,
 } from './core/types';
 import { DriverFactory } from './core/drivers';
+import type { DatabaseDriver } from './core/drivers/DatabaseDriver';
 import { ImportExportService } from './core/utils/ImportExportService';
 
 let connectionManager: ConnectionManager;
@@ -34,6 +35,7 @@ let webviewManager: WebviewManager;
 let connectionTreeProvider: ConnectionTreeProvider;
 let databaseTreeProvider: DatabaseTreeProvider;
 let schemaTreeProvider: SchemaTreeProvider;
+let schemaTreeView: vscode.TreeView<any>;
 let schemaProvider: SchemaProvider;
 let queryEngine: QueryEngine;
 let queryHistory: QueryHistory;
@@ -43,6 +45,57 @@ let queryContextStatusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext;
 let sqlCodeLensProvider: SQLCodeLensProvider | undefined;
 let lastTableOpenClick: { key: string; timestamp: number } | undefined;
+
+type ColumnFilterOperator = 'like' | 'startsWith' | 'endsWith' | 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'empty' | 'notEmpty' | 'null' | 'notNull';
+interface SqlColumnFilter {
+  column: number;
+  operator: ColumnFilterOperator;
+  value?: string;
+}
+
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, match => `\\${match}`);
+}
+
+function buildColumnFilterSql(driver: DatabaseDriver, columns: string[], filters?: SqlColumnFilter[]): string[] {
+  if (!Array.isArray(filters)) return [];
+  const clauses: string[] = [];
+
+  for (const filter of filters) {
+    const colName = columns[filter.column];
+    if (!colName) continue;
+    const col = driver.escapeIdentifier(colName);
+    const op = filter.operator || 'like';
+    const value = String(filter.value ?? '').trim();
+    const like = (pattern: string) => `${col} LIKE ${driver.escapeValue(pattern)} ESCAPE '\\'`;
+
+    if (op === 'null') clauses.push(`${col} IS NULL`);
+    else if (op === 'notNull') clauses.push(`${col} IS NOT NULL`);
+    else if (op === 'empty') clauses.push(`(${col} IS NULL OR ${col} = ${driver.escapeValue('')})`);
+    else if (op === 'notEmpty') clauses.push(`(${col} IS NOT NULL AND ${col} <> ${driver.escapeValue('')})`);
+    else {
+      if (!value) continue;
+      if (op === 'like') clauses.push(like(`%${escapeLikePattern(value)}%`));
+      else if (op === 'startsWith') clauses.push(like(`${escapeLikePattern(value)}%`));
+      else if (op === 'endsWith') clauses.push(like(`%${escapeLikePattern(value)}`));
+      else if (op === 'eq') clauses.push(`${col} = ${driver.escapeValue(value)}`);
+      else if (op === 'neq') clauses.push(`${col} <> ${driver.escapeValue(value)}`);
+      else if (op === 'gt') clauses.push(`${col} > ${driver.escapeValue(value)}`);
+      else if (op === 'gte') clauses.push(`${col} >= ${driver.escapeValue(value)}`);
+      else if (op === 'lt') clauses.push(`${col} < ${driver.escapeValue(value)}`);
+      else if (op === 'lte') clauses.push(`${col} <= ${driver.escapeValue(value)}`);
+    }
+  }
+
+  return clauses;
+}
+
+function appendWhereClauses(sql: string, whereFilter: string | undefined, columnFilterClauses: string[]): string {
+  const clauses: string[] = [];
+  if (whereFilter && whereFilter.trim()) clauses.push(`(${whereFilter})`);
+  clauses.push(...columnFilterClauses.map(clause => `(${clause})`));
+  return clauses.length > 0 ? `${sql} WHERE ${clauses.join(' AND ')}` : sql;
+}
 
 async function getCurrentDatabaseName(connectionId: string): Promise<string> {
   const activeConn = connectionManager.getActiveConnection(connectionId);
@@ -117,12 +170,11 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   );
 
-  context.subscriptions.push(
-    vscode.window.createTreeView('tablepro.schema', {
+  schemaTreeView = vscode.window.createTreeView('tablepro.schema', {
       treeDataProvider: schemaTreeProvider,
       showCollapseAll: true,
-    }),
-  );
+    });
+  context.subscriptions.push(schemaTreeView);
 
   // ── Language Features (Phase 2) ──
 
@@ -621,6 +673,22 @@ export function activate(context: vscode.ExtensionContext) {
         // Use limit+1 trick: fetch one extra row to know if there are more pages
         const sql = `SELECT * FROM ${escapedTable} ${driver.paginationSQL(pageSize + 1, 0)}`;
 
+        const initialLoadingResult: QueryResult = {
+          columns: [],
+          rows: [],
+          affectedRows: 0,
+          executionTime: 0,
+          truncated: false,
+          messages: [],
+        };
+
+        showResultsInDataGrid(table, initialLoadingResult, table, schema, connectionId, dbName, pageSize, false, {
+          pinned,
+          panelId,
+          querySql: sql,
+          loadingRows: true,
+        });
+
         let columnInfos: any[] = [];
         try {
           columnInfos = await driver.getColumns(table, schema);
@@ -628,30 +696,30 @@ export function activate(context: vscode.ExtensionContext) {
           columnInfos = [];
         }
 
-        if (columnInfos.length > 0) {
-          const loadingResult: QueryResult = {
-            columns: columnInfos.map(col => ({
-              name: col.name,
-              type: col.type,
-              normalizedType: col.normalizedType,
-              nullable: col.nullable,
-              isPrimaryKey: col.isPrimaryKey,
-              isAutoIncrement: col.isAutoIncrement,
-              defaultValue: col.defaultValue ?? null,
-              maxLength: col.maxLength,
-              precision: col.precision,
-              scale: col.scale,
-              rawType: col.type,
-              table,
-              schema,
-            })),
-            rows: [],
-            affectedRows: 0,
-            executionTime: 0,
-            truncated: false,
-            messages: [],
-          };
+        const loadingResult: QueryResult = {
+          columns: columnInfos.map(col => ({
+            name: col.name,
+            type: col.type,
+            normalizedType: col.normalizedType,
+            nullable: col.nullable,
+            isPrimaryKey: col.isPrimaryKey,
+            isAutoIncrement: col.isAutoIncrement,
+            defaultValue: col.defaultValue ?? null,
+            maxLength: col.maxLength,
+            precision: col.precision,
+            scale: col.scale,
+            rawType: col.type,
+            table,
+            schema,
+          })),
+          rows: [],
+          affectedRows: 0,
+          executionTime: 0,
+          truncated: false,
+          messages: [],
+        };
 
+        if (columnInfos.length > 0) {
           showResultsInDataGrid(table, loadingResult, table, schema, connectionId, dbName, pageSize, false, {
             pinned,
             panelId,
@@ -1340,10 +1408,29 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('tablepro.refreshSchema', () => {
+    vscode.commands.registerCommand('tablepro.refreshSchema', async () => {
+      const selectedTable = schemaTreeView.selection
+        .map((item: any) => item?.tableInfo ? {
+          name: item.tableInfo.name as string,
+          schema: item.tableInfo.schema as string | undefined,
+          connectionId: item.connectionId as string,
+        } : undefined)
+        .find(Boolean);
       schemaTreeProvider.clearCache();
       schemaTreeProvider.refresh();
       schemaProvider.refresh();
+      if (selectedTable) {
+        setTimeout(() => {
+          void schemaTreeProvider
+            .findTableItem(selectedTable.name, selectedTable.connectionId, selectedTable.schema)
+            .then(item => {
+              if (item) {
+                return schemaTreeView.reveal(item, { select: true, focus: false });
+              }
+              return undefined;
+            });
+        }, 150);
+      }
     }),
   );
 
@@ -1506,10 +1593,10 @@ export function activate(context: vscode.ExtensionContext) {
               ? `${driver.escapeIdentifier(schemaName)}.${driver.escapeIdentifier(tableName)}`
               : driver.escapeIdentifier(tableName);
             const whereFilter = (message as any).data?.whereFilter as string | undefined;
+            const columnFilters = (message as any).data?.columnFilters as SqlColumnFilter[] | undefined;
+            const columnFilterClauses = buildColumnFilterSql(driver, result.columns.map(c => c.name), columnFilters);
             let countSql = `SELECT COUNT(*) AS total FROM ${escapedTable}`;
-            if (whereFilter && whereFilter.trim()) {
-              countSql += ` WHERE ${whereFilter}`;
-            }
+            countSql = appendWhereClauses(countSql, whereFilter, columnFilterClauses);
             const countResult = await driver.query(countSql);
             const firstRow = countResult.rows[0] as any;
             const total = Number(firstRow?.total ?? firstRow?.TOTAL ?? firstRow?.[0] ?? 0);
@@ -1546,15 +1633,15 @@ export function activate(context: vscode.ExtensionContext) {
             const page = message.data.page;
             const sortStates: { column: number; direction: 'asc' | 'desc' }[] = (message as any).data.sortStates || [];
             const whereFilter: string | undefined = (message as any).data.whereFilter;
+            const columnFilters = (message as any).data.columnFilters as SqlColumnFilter[] | undefined;
 
             const escapedTable = schemaName
               ? `${driver.escapeIdentifier(schemaName)}.${driver.escapeIdentifier(tableName)}`
               : driver.escapeIdentifier(tableName);
 
             let sql = `SELECT * FROM ${escapedTable}`;
-            if (whereFilter && whereFilter.trim()) {
-              sql += ` WHERE ${whereFilter}`;
-            }
+            const columnFilterClauses = buildColumnFilterSql(driver, result.columns.map(c => c.name), columnFilters);
+            sql = appendWhereClauses(sql, whereFilter, columnFilterClauses);
             if (sortStates.length > 0) {
               const orderParts = sortStates.map(s => {
                 const colName = result.columns[s.column]?.name;
@@ -1605,6 +1692,7 @@ export function activate(context: vscode.ExtensionContext) {
                 const format: 'csv' | 'tsv' = data.format === 'tsv' ? 'tsv' : 'csv';
                 const sortStates: { column: number; direction: 'asc' | 'desc' }[] = data.sortStates || [];
                 const whereFilter: string | undefined = data.whereFilter;
+                const columnFilters = data.columnFilters as SqlColumnFilter[] | undefined;
                 const includeHeader = data.includeHeader !== false;
                 const separator = format === 'tsv' ? '\t' : ',';
                 const escapeCell = format === 'tsv' ? tsvEscape : csvEscape;
@@ -1613,9 +1701,8 @@ export function activate(context: vscode.ExtensionContext) {
                   : driver.escapeIdentifier(tableName);
 
                 let sql = `SELECT * FROM ${escapedTable}`;
-                if (whereFilter && whereFilter.trim()) {
-                  sql += ` WHERE ${whereFilter}`;
-                }
+                const columnFilterClauses = buildColumnFilterSql(driver, result.columns.map(c => c.name), columnFilters);
+                sql = appendWhereClauses(sql, whereFilter, columnFilterClauses);
                 if (sortStates.length > 0) {
                   const orderParts = sortStates.map(s => {
                     const colName = result.columns[s.column]?.name;
@@ -1716,32 +1803,47 @@ export function activate(context: vscode.ExtensionContext) {
       }
 
       if (message.type === 'previewSQL' && connId && tableName) {
-        const driver = connectionManager.getDriver(connId);
-        if (!driver) return;
-        const changedRows = message.data.rows as any[];
-        const columns = result.columns.map(c => c.name);
-        const pkCols = result.columns.filter(c => c.isPrimaryKey).map(c => c.name);
-        const escapedTable = schemaName
-          ? `${driver.escapeIdentifier(schemaName)}.${driver.escapeIdentifier(tableName)}`
-          : driver.escapeIdentifier(tableName);
-
-        const stmts: string[] = [];
-        for (const row of changedRows) {
-          if (row.status === 'modified') {
-            const sets = (row.changedCols as number[]).map(ci => `${driver.escapeIdentifier(columns[ci])} = ${driver.escapeValue(row.data[ci])}`).join(', ');
-            const where = (pkCols.length > 0 ? pkCols : columns).map(col => { const ci = columns.indexOf(col); const val = row.original[ci]; return val === null ? `${driver.escapeIdentifier(col)} IS NULL` : `${driver.escapeIdentifier(col)} = ${driver.escapeValue(val)}`; }).join(' AND ');
-            stmts.push(`UPDATE ${escapedTable} SET ${sets} WHERE ${where};`);
-          } else if (row.status === 'added') {
-            const nonNull = columns.map((col, i) => ({ col, val: row.data[i] })).filter(x => x.val !== null);
-            if (nonNull.length > 0) stmts.push(`INSERT INTO ${escapedTable} (${nonNull.map(x => driver.escapeIdentifier(x.col)).join(', ')}) VALUES (${nonNull.map(x => driver.escapeValue(x.val)).join(', ')});`);
-          } else if (row.status === 'deleted') {
-            const where = (pkCols.length > 0 ? pkCols : columns).map(col => { const ci = columns.indexOf(col); const val = row.original[ci]; return val === null ? `${driver.escapeIdentifier(col)} IS NULL` : `${driver.escapeIdentifier(col)} = ${driver.escapeValue(val)}`; }).join(' AND ');
-            stmts.push(`DELETE FROM ${escapedTable} WHERE ${where};`);
+        try {
+          const driver = connectionManager.getDriver(connId);
+          if (!driver) {
+            webviewManager.postMessage(panelId, {
+              type: 'previewSQLError',
+              data: { message: 'Failed to preview SQL: not connected' },
+            } as any);
+            return;
           }
-        }
-        if (stmts.length > 0) {
-          const doc = await vscode.workspace.openTextDocument({ language: 'sql', content: `-- Preview: ${stmts.length} changes\n\n${stmts.join('\n\n')}\n` });
-          await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+          const changedRows = message.data.rows as any[];
+          const columns = result.columns.map(c => c.name);
+          const pkCols = result.columns.filter(c => c.isPrimaryKey).map(c => c.name);
+          const escapedTable = schemaName
+            ? `${driver.escapeIdentifier(schemaName)}.${driver.escapeIdentifier(tableName)}`
+            : driver.escapeIdentifier(tableName);
+
+          const stmts: string[] = [];
+          for (const row of changedRows) {
+            if (row.status === 'modified') {
+              const sets = (row.changedCols as number[]).map(ci => `${driver.escapeIdentifier(columns[ci])} = ${driver.escapeValue(row.data[ci])}`).join(', ');
+              const where = (pkCols.length > 0 ? pkCols : columns).map(col => { const ci = columns.indexOf(col); const val = row.original[ci]; return val === null ? `${driver.escapeIdentifier(col)} IS NULL` : `${driver.escapeIdentifier(col)} = ${driver.escapeValue(val)}`; }).join(' AND ');
+              stmts.push(`UPDATE ${escapedTable} SET ${sets} WHERE ${where};`);
+            } else if (row.status === 'added') {
+              const nonNull = columns.map((col, i) => ({ col, val: row.data[i] })).filter(x => x.val !== null);
+              if (nonNull.length > 0) stmts.push(`INSERT INTO ${escapedTable} (${nonNull.map(x => driver.escapeIdentifier(x.col)).join(', ')}) VALUES (${nonNull.map(x => driver.escapeValue(x.val)).join(', ')});`);
+            } else if (row.status === 'deleted') {
+              const where = (pkCols.length > 0 ? pkCols : columns).map(col => { const ci = columns.indexOf(col); const val = row.original[ci]; return val === null ? `${driver.escapeIdentifier(col)} IS NULL` : `${driver.escapeIdentifier(col)} = ${driver.escapeValue(val)}`; }).join(' AND ');
+              stmts.push(`DELETE FROM ${escapedTable} WHERE ${where};`);
+            }
+          }
+
+          const sql = stmts.length > 0 ? `-- Preview: ${stmts.length} changes\n\n${stmts.join('\n\n')}\n` : '';
+          webviewManager.postMessage(panelId, {
+            type: 'previewSQLResult',
+            data: { sql, count: stmts.length },
+          } as any);
+        } catch (err) {
+          webviewManager.postMessage(panelId, {
+            type: 'previewSQLError',
+            data: { message: `Failed to preview SQL: ${err instanceof Error ? err.message : String(err)}` },
+          } as any);
         }
       }
 

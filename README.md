@@ -63,7 +63,7 @@ Quick install from GitHub:
 curl -L -o /tmp/tablepro-vscode.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-vscode.vsix && code --install-extension /tmp/tablepro-vscode.vsix --force
 ```
 
-For Agy IDE:
+For Agy IDE: 
 
 ```bash
 curl -L -o /tmp/tablepro-vscode.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-vscode.vsix && agy-ide --install-extension /tmp/tablepro-vscode.vsix --force
