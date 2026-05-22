@@ -54,7 +54,7 @@ interface SqlColumnFilter {
 }
 
 function escapeLikePattern(value: string): string {
-  return value.replace(/[\\%_]/g, match => `\\${match}`);
+  return value.replace(/[!%_]/g, match => `!${match}`);
 }
 
 function buildColumnFilterSql(driver: DatabaseDriver, columns: string[], filters?: SqlColumnFilter[]): string[] {
@@ -67,7 +67,7 @@ function buildColumnFilterSql(driver: DatabaseDriver, columns: string[], filters
     const col = driver.escapeIdentifier(colName);
     const op = filter.operator || 'like';
     const value = String(filter.value ?? '').trim();
-    const like = (pattern: string) => `${col} LIKE ${driver.escapeValue(pattern)} ESCAPE '\\'`;
+    const like = (pattern: string) => `${col} LIKE ${driver.escapeValue(pattern)} ESCAPE ${driver.escapeValue('!')}`;
 
     if (op === 'null') clauses.push(`${col} IS NULL`);
     else if (op === 'notNull') clauses.push(`${col} IS NOT NULL`);
@@ -650,6 +650,7 @@ export function activate(context: vscode.ExtensionContext) {
       if (!driver) { vscode.window.showErrorMessage('Not connected.'); return; }
 
       let openedPanelId: string | undefined;
+      let attemptedSql: string | undefined;
       try {
         const table = tableInfo.name;
         const schema = tableInfo.schema;
@@ -672,6 +673,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         // Use limit+1 trick: fetch one extra row to know if there are more pages
         const sql = `SELECT * FROM ${escapedTable} ${driver.paginationSQL(pageSize + 1, 0)}`;
+        attemptedSql = sql;
 
         const initialLoadingResult: QueryResult = {
           columns: [],
@@ -786,7 +788,8 @@ export function activate(context: vscode.ExtensionContext) {
           webviewManager.postMessage(openedPanelId, {
             type: 'error',
             data: { message: `Failed to open table: ${err instanceof Error ? err.message : String(err)}` },
-          });
+            querySql: attemptedSql,
+          } as any);
         }
         vscode.window.showErrorMessage(`Failed to open table: ${err}`);
       }
@@ -1550,6 +1553,11 @@ export function activate(context: vscode.ExtensionContext) {
         );
       }
     } catch (err) {
+      queryResultsViewProvider.postMessage({
+        type: 'error',
+        data: { message: `Query error: ${err instanceof Error ? err.message : String(err)}` },
+        querySql: sql,
+      } as any);
       vscode.window.showErrorMessage(`Query error: ${err instanceof Error ? err.message : err}`);
     }
   }
@@ -1629,6 +1637,7 @@ export function activate(context: vscode.ExtensionContext) {
       if (message.type === 'fetchPage' && connId && tableName) {
         const driver = connectionManager.getDriver(connId);
         if (driver) {
+          let sql: string | undefined;
           try {
             const page = message.data.page;
             const sortStates: { column: number; direction: 'asc' | 'desc' }[] = (message as any).data.sortStates || [];
@@ -1639,7 +1648,7 @@ export function activate(context: vscode.ExtensionContext) {
               ? `${driver.escapeIdentifier(schemaName)}.${driver.escapeIdentifier(tableName)}`
               : driver.escapeIdentifier(tableName);
 
-            let sql = `SELECT * FROM ${escapedTable}`;
+            sql = `SELECT * FROM ${escapedTable}`;
             const columnFilterClauses = buildColumnFilterSql(driver, result.columns.map(c => c.name), columnFilters);
             sql = appendWhereClauses(sql, whereFilter, columnFilterClauses);
             if (sortStates.length > 0) {
@@ -1675,7 +1684,8 @@ export function activate(context: vscode.ExtensionContext) {
             webviewManager.postMessage(panelId, {
               type: 'error',
               data: { message: `Failed to fetch page data: ${err instanceof Error ? err.message : String(err)}` },
-            });
+              querySql: sql,
+            } as any);
             vscode.window.showErrorMessage(`Failed to fetch page data: ${err}`);
           }
         }

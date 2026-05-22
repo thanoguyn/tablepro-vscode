@@ -2,7 +2,7 @@
 
 TablePro is a VS Code extension for browsing databases, running SQL, viewing table data, and working with local SQLite files directly inside the editor.
 
-It is currently an early release (`0.1.1`) focused on MySQL, PostgreSQL, and SQLite workflows.
+It is currently an early release (`0.1.7`) focused on MySQL, PostgreSQL, and SQLite workflows.
 
 ## Features
 
@@ -15,6 +15,8 @@ It is currently an early release (`0.1.1`) focused on MySQL, PostgreSQL, and SQL
 - Associate each query editor with a connection and database context.
 - Create new query tabs with the active database preselected.
 - Sort, filter, paginate, copy, and inspect result data.
+- Filter table columns with SQL-side operators such as `LIKE`, `=`, `>`, `<`, `IS NULL`, and `IS NOT NULL`.
+- Reorder and hide grid columns from the pagination bar, with optional automatic layout reuse.
 - Copy rows or visible pages as CSV, TSV, JSON, XML, SQL `INSERT`, or SQL `UPDATE`.
 - Use an embedded Quick View sidebar for row details and long values.
 - View recent grid activity in the embedded bottom log panel.
@@ -96,12 +98,62 @@ The data grid supports:
 
 - Server-side pagination for opened tables.
 - Sorting and WHERE filters.
+- SQL-side column filters for opened tables.
 - Cell and range selection.
 - Copying selected cells, rows, visible pages, or full table data.
 - Inline editing for supported table views.
 - Add, duplicate, delete, preview SQL, save, and discard changes.
 - Embedded right-side Quick View for selected rows.
 - Embedded bottom activity log with a list/detail layout.
+- A unified loading overlay while table data, filtered results, sorted pages, or reloaded pages are being fetched.
+
+### Data Grid Filters
+
+Use the filter button in the `#` header row to show or hide column filters. Column filters run against SQL for opened tables, so filtering is not limited to the current page.
+
+Default column filter operators are selected from the column type:
+
+| Column type | Default operator |
+| --- | --- |
+| Text/string | `LIKE` |
+| Number | `>` |
+| Date or UUID | `=` |
+| Datetime/timestamp | `>=` |
+
+Column filter operator shortcuts can be typed at the start of a filter input:
+
+| Input prefix | Operator |
+| --- | --- |
+| `>` | Greater than |
+| `>=` | Greater than or equal |
+| `<` | Less than |
+| `<=` | Less than or equal |
+| `=` or `==` | Equals |
+| `!=` or `<>` | Not equals |
+| `~` | Contains / `LIKE` |
+| `^` | Starts with |
+| `$` | Ends with |
+
+For example, typing `>= 100` changes the operator to `>=` and keeps `100` as the filter value. Typing `>` and then `=` also changes the operator to `>=`; typing `=` again changes it to `=`.
+
+Text-based row filtering runs when you press `Enter` or when the filter input loses focus. Column filter inputs that require a value also run on `Enter` or blur; null-style operators run immediately.
+
+### Data Grid Columns
+
+Use the **Columns** button on the right side of the pagination bar to customize the visible grid columns.
+
+- Check or uncheck columns to show or hide them.
+- Use the up/down buttons to reorder columns.
+- Enable **Apply automatically next time** to reuse the column layout for future grids.
+- Use **Reset** to restore the default column order and visibility.
+
+The current column layout affects the table view and copy/export helpers that use visible grid columns.
+
+### Data Grid Logs
+
+The bottom log panel records grid activity, including failed queries. When an error happens during a table load, page fetch, filter, or query execution, the log detail includes the SQL that was attempted when available.
+
+Log messages and SQL text can be selected directly, and the detail view includes copy actions for the full log entry or just the SQL.
 
 ## Keyboard Shortcuts
 

@@ -52,6 +52,11 @@ interface ColumnFilterState {
 
 interface GridPersistedState {
   showColumnFilters?: boolean;
+  columnLayout?: {
+    order?: string[];
+    hidden?: string[];
+    autoApply?: boolean;
+  };
 }
 
 type UndoAction =
@@ -136,6 +141,69 @@ function formatColumnType(col: ColumnHeader): string {
   return base;
 }
 
+function getDefaultColumnFilterOperator(col?: ColumnHeader): ColumnFilterOperator {
+  if (!col) return DEFAULT_COLUMN_FILTER_OPERATOR;
+  const normalizedType = (col.normalizedType || '').toLowerCase();
+  const rawType = `${col.rawType || ''} ${col.type || ''}`.toLowerCase();
+
+  if (
+    normalizedType === 'datetime' ||
+    normalizedType === 'timestamp' ||
+    rawType.includes('datetime') ||
+    rawType.includes('timestamp')
+  ) {
+    return 'gte';
+  }
+  if (normalizedType === 'date' || /\bdate\b/.test(rawType)) {
+    return 'eq';
+  }
+  if (normalizedType === 'uuid' || rawType.includes('uuid')) {
+    return 'eq';
+  }
+  if (
+    normalizedType === 'integer' ||
+    normalizedType === 'float' ||
+    normalizedType === 'decimal' ||
+    /\b(int|integer|tinyint|smallint|mediumint|bigint|number|numeric|decimal|float|double|real|money|year)\b/.test(rawType)
+  ) {
+    return 'gt';
+  }
+  return 'like';
+}
+
+function parseColumnFilterInputShortcut(
+  rawValue: string,
+  previousShortcut?: string,
+): { operator: ColumnFilterOperator; value: string; shortcut: string } | null {
+  if (rawValue === '=' && previousShortcut === '>') {
+    return { operator: 'gte', value: '', shortcut: '>=' };
+  }
+  if (rawValue === '=' && previousShortcut === '<') {
+    return { operator: 'lte', value: '', shortcut: '<=' };
+  }
+  if (rawValue === '=' && (previousShortcut === '>=' || previousShortcut === '<=')) {
+    return { operator: 'eq', value: '', shortcut: '=' };
+  }
+
+  const shortcuts: Array<[string, ColumnFilterOperator]> = [
+    ['>=', 'gte'],
+    ['<=', 'lte'],
+    ['!=', 'neq'],
+    ['<>', 'neq'],
+    ['==', 'eq'],
+    ['>', 'gt'],
+    ['<', 'lt'],
+    ['=', 'eq'],
+    ['~', 'like'],
+    ['^', 'startsWith'],
+    ['$', 'endsWith'],
+  ];
+  const match = shortcuts.find(([shortcut]) => rawValue.startsWith(shortcut));
+  if (!match) return null;
+  const [shortcut, operator] = match;
+  return { operator, value: rawValue.slice(shortcut.length).replace(/^\s+/, ''), shortcut };
+}
+
 function valueToText(value: unknown): string {
   if (value === null || value === undefined) return 'NULL';
   if (typeof value === 'object') {
@@ -208,6 +276,24 @@ function readPersistedGridState(): GridPersistedState {
   }
 }
 
+function getColumnLayoutKey(col: ColumnHeader): string {
+  return col.name;
+}
+
+function buildColumnLayoutFromPersisted(columns: ColumnHeader[], persisted?: GridPersistedState['columnLayout']) {
+  const keys = columns.map(getColumnLayoutKey);
+  if (!persisted?.autoApply) {
+    return { order: keys, hidden: new Set<string>(), autoApply: !!persisted?.autoApply };
+  }
+  const available = new Set(keys);
+  const order = [
+    ...(persisted.order || []).filter(key => available.has(key)),
+    ...keys.filter(key => !(persisted.order || []).includes(key)),
+  ];
+  const hidden = new Set((persisted.hidden || []).filter(key => available.has(key)));
+  return { order, hidden, autoApply: true };
+}
+
 function columnFilterKey(filters: Record<number, ColumnFilterState>): string {
   return Object.entries(filters)
     .filter(([, filter]) => isColumnFilterActive(filter))
@@ -224,6 +310,10 @@ export default function DataGrid() {
   const [filterText, setFilterText] = useState('');
   const [rowFilterApplying, setRowFilterApplying] = useState(false);
   const [showColumnFilters, setShowColumnFilters] = useState(() => !!readPersistedGridState().showColumnFilters);
+  const [columnOrder, setColumnOrder] = useState<string[]>(() => readPersistedGridState().columnLayout?.order || []);
+  const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(() => new Set(readPersistedGridState().columnLayout?.hidden || []));
+  const [autoApplyColumnLayout, setAutoApplyColumnLayout] = useState(() => !!readPersistedGridState().columnLayout?.autoApply);
+  const [showColumnMenu, setShowColumnMenu] = useState(false);
   const [draftColumnFilters, setDraftColumnFilters] = useState<Record<number, ColumnFilterState>>({});
   const [columnFilters, setColumnFilters] = useState<Record<number, ColumnFilterState>>({});
   const [whereFilter, setWhereFilter] = useState('');
@@ -267,8 +357,10 @@ export default function DataGrid() {
   const gridRef = useRef<HTMLDivElement>(null);
   const csvMenuRef = useRef<HTMLDivElement>(null);
   const tsvMenuRef = useRef<HTMLDivElement>(null);
+  const columnMenuRef = useRef<HTMLDivElement>(null);
   const hasDeletedRef = useRef(false);
   const filterTextRef = useRef('');
+  const columnFilterShortcutRef = useRef<Record<number, string>>({});
   const escStateRef = useRef<{ target: 'filter' | 'quickview' | null; count: number; time: number }>({ target: null, count: 0, time: 0 });
 
   function addLog(level: GridLogEntry['level'], message: string, query?: string) {
@@ -283,17 +375,22 @@ export default function DataGrid() {
     setSelectedLogId(prev => prev ?? entry.id);
   }
 
-  function showStatus(kind: 'success' | 'error' | 'info', text: string) {
+  function showStatus(kind: 'success' | 'error' | 'info', text: string, query?: string) {
     setCopyStatus({ kind, text });
-    addLog(kind === 'info' ? 'info' : kind, text);
+    addLog(kind === 'info' ? 'info' : kind, text, query);
     setTimeout(() => setCopyStatus(null), 1800);
   }
 
   useEffect(() => {
     try {
-      setState<GridPersistedState>({ showColumnFilters });
+      setState<GridPersistedState>({
+        showColumnFilters,
+        columnLayout: autoApplyColumnLayout
+          ? { order: columnOrder, hidden: Array.from(hiddenColumns), autoApply: true }
+          : { autoApply: false },
+      });
     } catch {}
-  }, [showColumnFilters]);
+  }, [showColumnFilters, columnOrder, hiddenColumns, autoApplyColumnLayout]);
 
   useEffect(() => {
     filterTextRef.current = filterText;
@@ -311,6 +408,13 @@ export default function DataGrid() {
         setAwaitingInitialResult(false);
         const r = msg.data as QueryResult;
         setResult(r);
+        if (r.columns.length > 0) {
+          const persistedLayout = readPersistedGridState().columnLayout;
+          const nextLayout = buildColumnLayoutFromPersisted(r.columns, persistedLayout);
+          setColumnOrder(nextLayout.order);
+          setHiddenColumns(nextLayout.hidden);
+          setAutoApplyColumnLayout(nextLayout.autoApply);
+        }
         setTableName(msg.tableName || '');
         const nextPageSize = msg.pageSize || DEFAULT_PAGE_SIZE;
         const nextHasMore = !!msg.hasMore;
@@ -341,6 +445,7 @@ export default function DataGrid() {
         setDdlText('');
         setDdlLoading(false);
         hasDeletedRef.current = false;
+        columnFilterShortcutRef.current = {};
         setUndoStack([]);
         setRedoStack([]);
         if (nextLoadingRows) {
@@ -397,12 +502,12 @@ export default function DataGrid() {
       } else if (msg.type === 'previewSQLError') {
         const error = msg.data?.message || 'Failed to preview SQL';
         setSqlPreview({ open: true, loading: false, sql: '', count: 0, error });
-        addLog('error', error);
+        addLog('error', error, msg.querySql || msg.data?.querySql);
       } else if (msg.type === 'error') {
         setAwaitingInitialResult(false);
         setDdlLoading(false);
         setLoadingRows(false);
-        showStatus('error', msg.data?.message || 'Data grid error');
+        showStatus('error', msg.data?.message || 'Data grid error', msg.querySql || msg.data?.querySql);
       }
     });
     return unsub;
@@ -427,6 +532,9 @@ export default function DataGrid() {
       }
       if (tsvMenuRef.current && !tsvMenuRef.current.contains(event.target as Node)) {
         setTsvMenuOpen(false);
+      }
+      if (columnMenuRef.current && !columnMenuRef.current.contains(event.target as Node)) {
+        setShowColumnMenu(false);
       }
     };
     window.addEventListener('pointerdown', handlePointerDown, true);
@@ -454,6 +562,38 @@ export default function DataGrid() {
     value: filter.value,
   })), [activeColumnFilters]);
   const clientColumnFilters = tableName ? [] : activeColumnFilters;
+  const columnKeys = useMemo(() => result?.columns.map(getColumnLayoutKey) || [], [result]);
+  const orderedColumnKeys = useMemo(() => {
+    const available = new Set(columnKeys);
+    const seen = new Set<string>();
+    const ordered = columnOrder.filter(key => {
+      if (!available.has(key) || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    for (const key of columnKeys) {
+      if (!seen.has(key)) ordered.push(key);
+    }
+    return ordered;
+  }, [columnKeys, columnOrder]);
+  const visibleColumnIndices = useMemo(() => {
+    const keyToIndex = new Map(columnKeys.map((key, idx) => [key, idx]));
+    return orderedColumnKeys
+      .filter(key => !hiddenColumns.has(key))
+      .map(key => keyToIndex.get(key))
+      .filter((idx): idx is number => idx !== undefined);
+  }, [columnKeys, hiddenColumns, orderedColumnKeys]);
+  const columnLayoutItems = useMemo(() => {
+    const keyToIndex = new Map(columnKeys.map((key, idx) => [key, idx]));
+    return orderedColumnKeys
+      .map(key => {
+        const idx = keyToIndex.get(key);
+        if (idx === undefined || !result) return null;
+        return { key, idx, col: result.columns[idx], visible: !hiddenColumns.has(key) };
+      })
+      .filter((item): item is { key: string; idx: number; col: ColumnHeader; visible: boolean } => item !== null);
+  }, [columnKeys, hiddenColumns, orderedColumnKeys, result]);
+  const visibleColumnCount = visibleColumnIndices.length;
 
   const filteredSortedIndices = useMemo(() => {
     const hasDeleted = hasDeletedRef.current;
@@ -821,7 +961,8 @@ export default function DataGrid() {
     .filter(({ operator, value }) => isColumnFilterActive({ operator, value })), []);
 
   const applyColumnFilter = useCallback((colIdx: number, filterOverride?: ColumnFilterState) => {
-    const nextFilter = filterOverride || draftColumnFilters[colIdx] || { operator: DEFAULT_COLUMN_FILTER_OPERATOR, value: '' };
+    const defaultFilter = { operator: getDefaultColumnFilterOperator(result?.columns[colIdx]), value: '' };
+    const nextFilter = filterOverride || draftColumnFilters[colIdx] || defaultFilter;
     const nextApplied = { ...columnFilters };
     if (isColumnFilterActive(nextFilter)) nextApplied[colIdx] = nextFilter;
     else delete nextApplied[colIdx];
@@ -835,10 +976,11 @@ export default function DataGrid() {
       setLoadingRows(true);
       postMessage({ type: 'fetchPage', data: { page: 0, sortStates, whereFilter: whereFilter || undefined, columnFilters: nextSqlFilters } });
     }
-  }, [columnFilters, draftColumnFilters, serializeSqlColumnFilters, tableName, sortStates, whereFilter]);
+  }, [columnFilters, draftColumnFilters, result, serializeSqlColumnFilters, tableName, sortStates, whereFilter]);
 
   const updateColumnFilter = useCallback((colIdx: number, patch: Partial<ColumnFilterState>) => {
-    const current = draftColumnFilters[colIdx] || columnFilters[colIdx] || { operator: DEFAULT_COLUMN_FILTER_OPERATOR, value: '' };
+    const defaultFilter = { operator: getDefaultColumnFilterOperator(result?.columns[colIdx]), value: '' };
+    const current = draftColumnFilters[colIdx] || columnFilters[colIdx] || defaultFilter;
     const nextFilter = { ...current, ...patch };
     setDraftColumnFilters(prev => ({ ...prev, [colIdx]: nextFilter }));
     const currentMeta = COLUMN_FILTER_OPERATORS.find(op => op.value === current.operator);
@@ -846,9 +988,22 @@ export default function DataGrid() {
     if (operatorMeta?.needsValue === false || (patch.operator && currentMeta?.needsValue === false)) {
       applyColumnFilter(colIdx, nextFilter);
     }
-  }, [applyColumnFilter, columnFilters, draftColumnFilters]);
+  }, [applyColumnFilter, columnFilters, draftColumnFilters, result]);
+
+  const handleColumnFilterInputChange = useCallback((colIdx: number, rawValue: string) => {
+    const shortcut = parseColumnFilterInputShortcut(rawValue, columnFilterShortcutRef.current[colIdx]);
+    if (shortcut) {
+      if (shortcut.value === '') columnFilterShortcutRef.current[colIdx] = shortcut.shortcut;
+      else delete columnFilterShortcutRef.current[colIdx];
+      updateColumnFilter(colIdx, { operator: shortcut.operator, value: shortcut.value });
+      return;
+    }
+    delete columnFilterShortcutRef.current[colIdx];
+    updateColumnFilter(colIdx, { value: rawValue });
+  }, [updateColumnFilter]);
 
   const clearColumnFilters = useCallback(() => {
+    columnFilterShortcutRef.current = {};
     setDraftColumnFilters({});
     setColumnFilters({});
     setPage(0);
@@ -858,6 +1013,33 @@ export default function DataGrid() {
       postMessage({ type: 'fetchPage', data: { page: 0, sortStates, whereFilter: whereFilter || undefined, columnFilters: [] } });
     }
   }, [tableName, sortStates, whereFilter]);
+
+  const moveColumnLayoutItem = useCallback((key: string, direction: -1 | 1) => {
+    setColumnOrder(prev => {
+      const base = orderedColumnKeys.length > 0 ? [...orderedColumnKeys] : [...prev];
+      const index = base.indexOf(key);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= base.length) return prev;
+      const next = [...base];
+      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+      return next;
+    });
+  }, [orderedColumnKeys]);
+
+  const toggleColumnVisibility = useCallback((key: string) => {
+    setHiddenColumns(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const resetColumnLayout = useCallback(() => {
+    const keys = result?.columns.map(getColumnLayoutKey) || [];
+    setColumnOrder(keys);
+    setHiddenColumns(new Set());
+  }, [result]);
 
   // ── Range Selection ──
   const isCellInRange = useCallback((row: number, col: number) => {
@@ -1024,6 +1206,15 @@ export default function DataGrid() {
       }
     }
   }, [selectedRow, pageRows, result, showQuickViewSidebar]);
+
+  useEffect(() => {
+    if (selectedCol >= 0 && visibleColumnIndices.length > 0 && !visibleColumnIndices.includes(selectedCol)) {
+      const nextCol = visibleColumnIndices.find(idx => idx > selectedCol) ?? visibleColumnIndices[visibleColumnIndices.length - 1];
+      setSelectedCol(nextCol);
+      setSelectionStart(prev => prev ? { ...prev, col: nextCol } : prev);
+      setSelectionEnd(prev => prev ? { ...prev, col: nextCol } : prev);
+    }
+  }, [selectedCol, visibleColumnIndices]);
 
   // ── Pagination ──
   const handleCountRows = useCallback(() => {
@@ -1268,38 +1459,40 @@ export default function DataGrid() {
   const buildDelimited = useCallback((items: { row: RowState; origIdx: number }[], includeHeader: boolean, format: 'csv' | 'tsv') => {
     if (!result) return '';
     const separator = format === 'tsv' ? '\t' : ',';
-    const header = result.columns.map(c => formatDelimitedCell(c.name, separator)).join(separator);
-    const body = items.map(x => x.row.data.map(v => formatDelimitedCell(v, separator)).join(separator)).join('\n');
+    const columnIndices = visibleColumnIndices;
+    const header = columnIndices.map(idx => formatDelimitedCell(result.columns[idx].name, separator)).join(separator);
+    const body = items.map(x => columnIndices.map(idx => formatDelimitedCell(x.row.data[idx], separator)).join(separator)).join('\n');
     return includeHeader ? `${header}\n${body}` : body;
-  }, [result, formatDelimitedCell]);
+  }, [result, visibleColumnIndices, formatDelimitedCell]);
 
   const copyRowAs = useCallback((format: CopyFormat, visIdx: number) => {
     if (!result) return;
     const item = pageRows[visIdx];
     if (!item) return;
     const row = item.row.data;
-    const cols = result.columns;
+    const columnIndices = visibleColumnIndices;
+    const cols = columnIndices.map(idx => result.columns[idx]);
     let output = '';
     if (format === 'csv' || format === 'csv-noheader') {
-      const line = row.map(v => formatDelimitedCell(v, ',')).join(',');
+      const line = columnIndices.map(idx => formatDelimitedCell(row[idx], ',')).join(',');
       output = format === 'csv' ? `${cols.map(c => formatDelimitedCell(c.name, ',')).join(',')}\n${line}` : line;
     } else if (format === 'tsv' || format === 'tsv-noheader') {
-      const line = row.map(v => formatDelimitedCell(v, '\t')).join('\t');
+      const line = columnIndices.map(idx => formatDelimitedCell(row[idx], '\t')).join('\t');
       output = format === 'tsv' ? `${cols.map(c => c.name).join('\t')}\n${line}` : line;
     } else if (format === 'json') {
       const obj: Record<string, unknown> = {};
-      cols.forEach((col, i) => { obj[col.name] = row[i]; });
+      columnIndices.forEach((idx, i) => { obj[cols[i].name] = row[idx]; });
       output = JSON.stringify(obj, null, 2);
     } else if (format === 'xml') {
-      const inner = cols.map((col, i) => {
-        const val = row[i];
+      const inner = columnIndices.map((idx, i) => {
+        const val = row[idx];
         const escaped = val === null ? '' : String(val).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        return `  <${col.name}>${escaped}</${col.name}>`;
+        return `  <${cols[i].name}>${escaped}</${cols[i].name}>`;
       }).join('\n');
       output = `<row>\n${inner}\n</row>`;
     } else if (format === 'insert') {
       const colList = cols.map(c => `\`${c.name}\``).join(', ');
-      const valList = row.map(v => {
+      const valList = columnIndices.map(idx => row[idx]).map(v => {
         if (v === null) return 'NULL';
         if (typeof v === 'number' || typeof v === 'boolean') return String(v);
         return `'${String(v).replace(/'/g, "''")}'`;
@@ -1308,18 +1501,18 @@ export default function DataGrid() {
     } else if (format === 'update') {
       const pkCols = cols.filter(c => c.isPrimaryKey);
       const sets = cols.map((col, i) => {
-        const val = row[i];
+        const val = row[columnIndices[i]];
         const valStr = val === null ? 'NULL' : (typeof val === 'number' || typeof val === 'boolean' ? String(val) : `'${String(val).replace(/'/g, "''")}'`);
         return `\`${col.name}\` = ${valStr}`;
       }).join(', ');
       const where = (pkCols.length > 0 ? pkCols : cols).map(col => {
-        const i = cols.indexOf(col); const val = row[i];
+        const i = cols.indexOf(col); const val = row[columnIndices[i]];
         return `\`${col.name}\` = ${val === null ? 'NULL' : typeof val === 'number' ? val : `'${String(val).replace(/'/g, "''")}'`}`;
       }).join(' AND ');
       output = `UPDATE ${tableName} SET ${sets} WHERE ${where};`;
     }
     void writeClipboard(output, `Copied ${format.toUpperCase()}`);
-  }, [result, pageRows, tableName, formatDelimitedCell, writeClipboard]);
+  }, [result, pageRows, tableName, visibleColumnIndices, formatDelimitedCell, writeClipboard]);
 
   const handleCopyDelimited = useCallback((format: 'csv' | 'tsv', includeHeader = true, scope: 'page' | 'all' = 'page') => {
     if (!result) return;
@@ -1430,7 +1623,10 @@ export default function DataGrid() {
       }
       case 'ArrowRight': {
         e.preventDefault();
-        const nextC = Math.min(selectedCol + 1, result.columns.length - 1);
+        const currentVisibleIdx = visibleColumnIndices.indexOf(selectedCol);
+        const nextC = currentVisibleIdx >= 0
+          ? visibleColumnIndices[Math.min(currentVisibleIdx + 1, visibleColumnIndices.length - 1)]
+          : (visibleColumnIndices[0] ?? Math.min(selectedCol + 1, result.columns.length - 1));
         setSelectedCol(nextC);
         if (e.shiftKey) {
           setSelectionEnd(prev => ({ row: prev ? prev.row : selectedRow, col: nextC }));
@@ -1442,7 +1638,10 @@ export default function DataGrid() {
       }
       case 'ArrowLeft': {
         e.preventDefault();
-        const nextC = Math.max(selectedCol - 1, 0);
+        const currentVisibleIdx = visibleColumnIndices.indexOf(selectedCol);
+        const nextC = currentVisibleIdx >= 0
+          ? visibleColumnIndices[Math.max(currentVisibleIdx - 1, 0)]
+          : (visibleColumnIndices[0] ?? Math.max(selectedCol - 1, 0));
         setSelectedCol(nextC);
         if (e.shiftKey) {
           setSelectionEnd(prev => ({ row: prev ? prev.row : selectedRow, col: nextC }));
@@ -1479,7 +1678,7 @@ export default function DataGrid() {
         }
         break;
     }
-  }, [editingCell, result, showWhereInput, showQuickViewSidebar, selectedRow, selectedCol, selectedRows, pageRows, startEdit, commitEdit, cancelEdit, undo, redo, pasteData, handleReload, copySelection, closeAfterSecondEsc, deleteRows, setCellsToNull]);
+  }, [editingCell, result, showWhereInput, showQuickViewSidebar, selectedRow, selectedCol, selectedRows, pageRows, visibleColumnIndices, startEdit, commitEdit, cancelEdit, undo, redo, pasteData, handleReload, copySelection, closeAfterSecondEsc, deleteRows, setCellsToNull]);
 
   useEffect(() => {
     const handleGlobalKeyDown = (event: KeyboardEvent) => {
@@ -1665,7 +1864,8 @@ export default function DataGrid() {
             )}
           </div>
         ) : (
-          <div className="datagrid-table-wrapper">
+          <div className="datagrid-table-pane">
+            <div className="datagrid-table-wrapper">
             <table className="datagrid-table">
               <thead>
                 <tr>
@@ -1685,7 +1885,8 @@ export default function DataGrid() {
                       </button>
                     </div>
                   </th>
-                  {result.columns.map((col, i) => {
+                  {visibleColumnIndices.map(i => {
+                    const col = result.columns[i];
                     const colSort = sortStates.find(s => s.column === i);
                     const sortOrder = sortStates.findIndex(s => s.column === i) + 1;
                     return (
@@ -1722,8 +1923,10 @@ export default function DataGrid() {
                         {activeColumnFilterCount > 0 && <span className="column-filter-badge">{activeColumnFilterCount}</span>}
                       </button>
                     </th>
-                    {result.columns.map((col, i) => {
-                      const filter = draftColumnFilters[i] || columnFilters[i] || { operator: DEFAULT_COLUMN_FILTER_OPERATOR, value: '' };
+                    {visibleColumnIndices.map(i => {
+                      const col = result.columns[i];
+                      const defaultFilter = { operator: getDefaultColumnFilterOperator(col), value: '' };
+                      const filter = draftColumnFilters[i] || columnFilters[i] || defaultFilter;
                       const operatorMeta = COLUMN_FILTER_OPERATORS.find(op => op.value === filter.operator);
                       const applied = isColumnFilterActive(columnFilters[i]);
                       return (
@@ -1734,7 +1937,10 @@ export default function DataGrid() {
                               <select
                                 className="column-filter-operator"
                                 value={filter.operator}
-                                onChange={e => updateColumnFilter(i, { operator: e.target.value as ColumnFilterOperator })}
+                                onChange={e => {
+                                  delete columnFilterShortcutRef.current[i];
+                                  updateColumnFilter(i, { operator: e.target.value as ColumnFilterOperator });
+                                }}
                                 title={`Filter ${col.name} operator`}
                               >
                                 {COLUMN_FILTER_OPERATORS.map(op => (
@@ -1745,7 +1951,7 @@ export default function DataGrid() {
                             <input
                               value={filter.value}
                               disabled={operatorMeta?.needsValue === false}
-                              onChange={e => updateColumnFilter(i, { value: e.target.value })}
+                              onChange={e => handleColumnFilterInputChange(i, e.target.value)}
                               onKeyDown={e => {
                                 if (e.key === 'Enter') {
                                   e.preventDefault();
@@ -1765,16 +1971,9 @@ export default function DataGrid() {
                 )}
               </thead>
               <tbody>
-                {loadingRows && pageRows.length === 0 ? (
+                {!loadingRows && pageRows.length === 0 ? (
                   <tr>
-                    <td className="loading-row" colSpan={result.columns.length + 2}>
-                      <span className="loading-spinner" />
-                      Loading rows...
-                    </td>
-                  </tr>
-                ) : pageRows.length === 0 ? (
-                  <tr>
-                    <td className="loading-row" colSpan={result.columns.length + 2}>
+                    <td className="loading-row" colSpan={visibleColumnCount + 2}>
                       No rows
                     </td>
                   </tr>
@@ -1789,7 +1988,8 @@ export default function DataGrid() {
                       <td className="row-num" onClick={(e) => { e.stopPropagation(); selectRowAllColumns(visIdx, e); }}>
                         {item.row.status === 'added' ? '✦' : absIdx + 1}
                       </td>
-                      {item.row.data.map((cell, ci) => {
+                      {visibleColumnIndices.map(ci => {
+                        const cell = item.row.data[ci];
                         const isEditing = editingCell?.row === visIdx && editingCell?.col === ci;
                         const isChanged = item.row.changedCols.has(ci);
                         const isInSelection = isCellInRange(visIdx, ci);
@@ -1805,6 +2005,9 @@ export default function DataGrid() {
                             title={cell === null ? 'NULL' : String(cell)}>
                             {isEditing ? (
                               <input ref={editInputRef} className="cell-editor" value={editValue}
+                                onMouseDown={e => e.stopPropagation()}
+                                onClick={e => e.stopPropagation()}
+                                onDoubleClick={e => e.stopPropagation()}
                                 onChange={e => setEditValue(e.target.value)}
                                 onBlur={commitEdit}
                                 onKeyDown={e => {
@@ -1825,7 +2028,8 @@ export default function DataGrid() {
                 })}
               </tbody>
             </table>
-            {loadingRows && pageRows.length > 0 && (
+            </div>
+            {loadingRows && (
               <div className="datagrid-loading-overlay">
                 <div className="datagrid-loading-pill">
                   <span className="loading-spinner" />
@@ -1943,7 +2147,55 @@ export default function DataGrid() {
               disabled={loadingRows || viewMode === 'ddl' || (tableName ? !hasMore : (page + 1) * pageSize >= visibleRowsCount)}
               onClick={() => handlePageChange(page + 1)}>⟩</button>
           </div>
-          <div className="pagination-right" />
+          <div className="pagination-right">
+            <div className="column-menu-wrap" ref={columnMenuRef}>
+              <button
+                className={`page-btn column-menu-btn ${showColumnMenu ? 'active' : ''}`}
+                onClick={() => setShowColumnMenu(v => !v)}
+                disabled={viewMode === 'ddl' || result.columns.length === 0}
+                title="Columns"
+              >
+                Columns
+              </button>
+              {showColumnMenu && (
+                <div className="column-menu-popover" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
+                  <div className="column-menu-header">
+                    <strong>Columns</strong>
+                    <span>{visibleColumnCount}/{result.columns.length}</span>
+                  </div>
+                  <div className="column-menu-list">
+                    {columnLayoutItems.map((item, idx) => (
+                      <div key={item.key} className={`column-menu-item ${item.visible ? '' : 'hidden'}`}>
+                        <label title={item.col.name}>
+                          <input
+                            type="checkbox"
+                            checked={item.visible}
+                            onChange={() => toggleColumnVisibility(item.key)}
+                          />
+                          <span>{item.col.name}</span>
+                        </label>
+                        <div className="column-menu-move">
+                          <button disabled={idx === 0} onClick={() => moveColumnLayoutItem(item.key, -1)} title="Move up">↑</button>
+                          <button disabled={idx === columnLayoutItems.length - 1} onClick={() => moveColumnLayoutItem(item.key, 1)} title="Move down">↓</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="column-menu-footer">
+                    <label className="column-menu-save">
+                      <input
+                        type="checkbox"
+                        checked={autoApplyColumnLayout}
+                        onChange={e => setAutoApplyColumnLayout(e.target.checked)}
+                      />
+                      <span>Apply automatically next time</span>
+                    </label>
+                    <button onClick={resetColumnLayout}>Reset</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       )}
       <button className={`datagrid-log-strip ${latestLog?.level || 'info'}`} onClick={() => setShowLogDrawer(v => !v)} title="Toggle logs">
@@ -1991,12 +2243,30 @@ export default function DataGrid() {
                     <div className="log-detail-header">
                       <span className="log-detail-level">{selectedLog.level}</span>
                       <span className="log-detail-time">{selectedLog.time}</span>
+                      <button
+                        className="log-copy-btn"
+                        onClick={() => {
+                          const text = selectedLog.query
+                            ? `${selectedLog.message}\n\nSQL:\n${selectedLog.query}`
+                            : selectedLog.message;
+                          void writeClipboard(text, 'Copied log');
+                        }}
+                      >
+                        Copy
+                      </button>
                     </div>
                     <pre className="log-detail-message">{selectedLog.message}</pre>
                     {selectedLog.query && (
-                      <button className="log-detail-query" onClick={() => setExpandedLogQuery(selectedLog.query || '')}>
-                        {selectedLog.query}
-                      </button>
+                      <div className="log-detail-query">
+                        <div className="log-detail-query-header">
+                          <span>SQL</span>
+                          <div>
+                            <button onClick={() => setExpandedLogQuery(selectedLog.query || '')}>Open</button>
+                            <button onClick={() => void writeClipboard(selectedLog.query || '', 'Copied query')}>Copy</button>
+                          </div>
+                        </div>
+                        <pre className="log-detail-query-text">{selectedLog.query}</pre>
+                      </div>
                     )}
                   </>
                 )}
