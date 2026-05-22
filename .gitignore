@@ -4,3 +4,4 @@ dist/
 !tablepro-vscode.vsix
 .vscode-test/
 webview-ui/node_modules/
+*.sqlite
