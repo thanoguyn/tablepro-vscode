@@ -1,5 +1,6 @@
 node_modules/
 dist/
 *.vsix
+!tablepro-vscode.vsix
 .vscode-test/
 webview-ui/node_modules/

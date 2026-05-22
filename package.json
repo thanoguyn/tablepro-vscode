@@ -2,7 +2,7 @@
   "name": "tablepro-vscode",
   "displayName": "TablePro Vscode - Database Client",
   "description": "A fast, feature-rich database client for VSCode. Connect to MySQL, PostgreSQL, SQLite and more.",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "publisher": "thanoguyn",
   "license": "MIT",
   "repository": {
@@ -37,12 +37,14 @@
     "onCustomEditor:tablepro.sqliteViewer",
     "onStartupFinished",
     "onView:tablepro.connections",
+    "onView:tablepro.databases",
     "onView:tablepro.schema",
     "onView:tablepro.queryResultsView",
     "onCommand:tablepro.newConnection",
     "onCommand:tablepro.editConnection",
     "onCommand:tablepro.deleteConnection",
     "onCommand:tablepro.connect",
+    "onCommand:tablepro.selectConnection",
     "onCommand:tablepro.disconnect",
     "onCommand:tablepro.testConnection",
     "onCommand:tablepro.newQuery",
@@ -115,6 +117,10 @@
           "name": "Connections"
         },
         {
+          "id": "tablepro.databases",
+          "name": "Database"
+        },
+        {
           "id": "tablepro.schema",
           "name": "Schema"
         }
@@ -157,6 +163,12 @@
         "title": "Connect",
         "category": "TablePro",
         "icon": "$(plug)"
+      },
+      {
+        "command": "tablepro.selectConnection",
+        "title": "Select Connection",
+        "category": "TablePro",
+        "icon": "$(database)"
       },
       {
         "command": "tablepro.disconnect",
@@ -329,7 +341,7 @@
         },
         {
           "command": "tablepro.refreshSchema",
-          "when": "view == tablepro.schema",
+          "when": "view == tablepro.databases || view == tablepro.schema",
           "group": "navigation"
         }
       ],
@@ -531,8 +543,8 @@
     "compile:tests": "tsc -p tsconfig.json",
     "test": "npm run compile:tests && node ./dist/test/runTest.js",
     "package": "vsce package",
-    "publish": "vsce publish",
-    "deploy": "vsce package && vsce publish"
+    "package:final": "vsce package -o tablepro-vscode.vsix",
+    "publish": "vsce publish"
   },
   "dependencies": {
     "mysql2": "^3.11.0",

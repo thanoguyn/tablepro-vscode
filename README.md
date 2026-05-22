@@ -60,13 +60,13 @@ For manual VSIX installation instructions, see [INSTALL_VSIX.md](./INSTALL_VSIX.
 Quick install from GitHub:
 
 ```bash
-curl -L -o /tmp/tablepro-0.1.1.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.1.vsix && code --install-extension /tmp/tablepro-0.1.1.vsix --force
+curl -L -o /tmp/tablepro-vscode.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-vscode.vsix && code --install-extension /tmp/tablepro-vscode.vsix --force
 ```
 
 For Agy IDE:
 
 ```bash
-curl -L -o /tmp/tablepro-0.1.1.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-0.1.1.vsix && agy-ide --install-extension /tmp/tablepro-0.1.1.vsix --force
+curl -L -o /tmp/tablepro-vscode.vsix https://github.com/thanoguyn/tablepro-vscode/raw/main/tablepro-vscode.vsix && agy-ide --install-extension /tmp/tablepro-vscode.vsix --force
 ```
 
 ## SQLite Files
