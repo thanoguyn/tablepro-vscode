@@ -2,28 +2,7 @@ import * as vscode from 'vscode';
 import { ConnectionManager } from '../../core/connection/ConnectionManager';
 import { TableInfo, ColumnInfo, DatabaseType } from '../../core/types';
 
-type SchemaTreeItem = DatabaseItem | SchemaGroupItem | TableGroupItem | TableItem | ColumnItem;
-
-class DatabaseItem extends vscode.TreeItem {
-  constructor(
-    public readonly dbName: string,
-    public readonly connectionId: string,
-    public readonly isActive: boolean,
-  ) {
-    super(dbName, vscode.TreeItemCollapsibleState.Collapsed);
-    this.iconPath = new vscode.ThemeIcon(isActive ? 'database' : 'circle-outline');
-    this.contextValue = 'database';
-    this.description = isActive ? '(active)' : '';
-
-    if (!isActive) {
-      this.command = {
-        command: 'tablepro.switchDatabase',
-        title: 'Switch Database',
-        arguments: [connectionId, dbName],
-      };
-    }
-  }
-}
+type SchemaTreeItem = SchemaGroupItem | TableGroupItem | TableItem | ColumnItem;
 
 class SchemaGroupItem extends vscode.TreeItem {
   constructor(
@@ -193,39 +172,20 @@ export class SchemaTreeProvider implements vscode.TreeDataProvider<SchemaTreeIte
       return this.getTableGroups(element.connectionId, element.schemaName);
     }
 
-    // Database level
-    if (element instanceof DatabaseItem) {
-      // For databases that support schemas (PostgreSQL), show schema groups
+    // Root level
+    if (!element) {
+      // The database list is handled by the Databases view. Schema always reflects
+      // the active database for the selected connection.
       if (conn.config.type === DatabaseType.PostgreSQL) {
         try {
           const schemas = await driver.getSchemas();
-          return schemas.map(s => new SchemaGroupItem(s.name, element.connectionId));
+          return schemas.map(s => new SchemaGroupItem(s.name, connectionId));
         } catch {
-          return this.getTableGroups(element.connectionId);
+          return this.getTableGroups(connectionId);
         }
       }
-      return this.getTableGroups(element.connectionId);
-    }
 
-    // Root level
-    if (!element) {
-      // For SQLite, go directly to table groups
-      if (conn.config.type === DatabaseType.SQLite) {
-        return this.getTableGroups(connectionId);
-      }
-
-      // For other databases, show database list
-      try {
-        const currentDb = await driver.getCurrentDatabase();
-        const databases = await driver.getDatabases();
-
-        return databases.map(db =>
-          new DatabaseItem(db.name, connectionId, db.name === currentDb)
-        );
-      } catch {
-        // Fallback: just show tables
-        return this.getTableGroups(connectionId);
-      }
+      return this.getTableGroups(connectionId);
     }
 
     return [];
@@ -235,7 +195,8 @@ export class SchemaTreeProvider implements vscode.TreeDataProvider<SchemaTreeIte
     const driver = this.connectionManager.getDriver(connectionId);
     if (!driver) { return []; }
 
-    const cacheKey = `${connectionId}:${schema || ''}`;
+    const currentDb = await driver.getCurrentDatabase().catch(() => '');
+    const cacheKey = `${connectionId}:${currentDb}:${schema || ''}`;
     let tables = this.cachedTables.get(cacheKey);
 
     if (!tables) {
@@ -263,7 +224,8 @@ export class SchemaTreeProvider implements vscode.TreeDataProvider<SchemaTreeIte
     const driver = this.connectionManager.getDriver(connectionId);
     if (!driver) { return []; }
 
-    const cacheKey = `${connectionId}:${schema || ''}:${table}`;
+    const currentDb = await driver.getCurrentDatabase().catch(() => '');
+    const cacheKey = `${connectionId}:${currentDb}:${schema || ''}:${table}`;
     let columns = this.cachedColumns.get(cacheKey);
 
     if (!columns) {

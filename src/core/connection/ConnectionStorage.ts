@@ -11,7 +11,10 @@ export class ConnectionStorage {
   constructor(private context: vscode.ExtensionContext) {}
 
   async getAll(): Promise<ConnectionConfig[]> {
-    const connections = this.context.globalState.get<ConnectionConfig[]>(CONNECTIONS_KEY, []);
+    const connections = this.filterForCurrentWorkspace(
+      this.context.globalState.get<ConnectionConfig[]>(CONNECTIONS_KEY, [])
+    );
+
     // Restore passwords from secret storage
     for (const conn of connections) {
       conn.password = await this.getPassword(conn.id);
@@ -23,8 +26,16 @@ export class ConnectionStorage {
   }
 
   async get(id: string): Promise<ConnectionConfig | undefined> {
-    const connections = await this.getAll();
-    return connections.find(c => c.id === id);
+    const connections = this.context.globalState.get<ConnectionConfig[]>(CONNECTIONS_KEY, []);
+    for (const conn of connections) {
+      if (conn.id !== id) { continue; }
+      conn.password = await this.getPassword(conn.id);
+      if (conn.ssh.enabled && conn.ssh.authMethod === 'password') {
+        conn.ssh.password = await this.getSSHPassword(conn.id);
+      }
+      return conn;
+    }
+    return undefined;
   }
 
   async save(config: ConnectionConfig): Promise<void> {
@@ -77,6 +88,60 @@ export class ConnectionStorage {
 
   private async getAllWithoutPasswords(): Promise<ConnectionConfig[]> {
     return this.context.globalState.get<ConnectionConfig[]>(CONNECTIONS_KEY, []);
+  }
+
+  private filterForCurrentWorkspace(connections: ConnectionConfig[]): ConnectionConfig[] {
+    const workspaceFolders = vscode.workspace.workspaceFolders || [];
+    if (workspaceFolders.length === 0) {
+      return connections.filter(c => !this.isAutoImported(c));
+    }
+
+    const roots = workspaceFolders.map(f => this.normalizePath(f.uri.fsPath));
+    const names = new Set(workspaceFolders.map(f => f.name));
+
+    return connections.filter(conn => {
+      if (!this.isAutoImported(conn)) {
+        return true;
+      }
+
+      const options = conn.options || {};
+      const workspaceRoot = typeof options.tableproWorkspaceRoot === 'string'
+        ? this.normalizePath(options.tableproWorkspaceRoot)
+        : '';
+      if (workspaceRoot && roots.includes(workspaceRoot)) {
+        return true;
+      }
+
+      const sourceFile = typeof options.tableproSourceFile === 'string'
+        ? this.normalizePath(options.tableproSourceFile)
+        : '';
+      if (sourceFile && roots.some(root => this.isPathInside(sourceFile, root))) {
+        return true;
+      }
+
+      const dbPath = conn.filepath || (conn.type === 'sqlite' ? conn.database : '');
+      if (dbPath) {
+        const normalizedDbPath = this.normalizePath(dbPath);
+        if (roots.some(root => this.isPathInside(normalizedDbPath, root))) {
+          return true;
+        }
+      }
+
+      const legacyWorkspaceTag = conn.tags?.find(tag => names.has(tag));
+      return !!legacyWorkspaceTag;
+    });
+  }
+
+  private isAutoImported(conn: ConnectionConfig): boolean {
+    return conn.tags?.includes('auto-imported') || /^Imported \(.+\)$/.test(conn.group || '');
+  }
+
+  private normalizePath(filePath: string): string {
+    return filePath.replace(/\\/g, '/').replace(/\/+$/, '');
+  }
+
+  private isPathInside(filePath: string, root: string): boolean {
+    return filePath === root || filePath.startsWith(`${root}/`);
   }
 
   private async getPassword(id: string): Promise<string | undefined> {

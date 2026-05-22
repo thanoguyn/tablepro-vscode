@@ -8,6 +8,7 @@ import { ExtensionMessage, WebviewMessage } from '../../core/types';
  */
 export class WebviewManager {
   private panels = new Map<string, vscode.WebviewPanel>();
+  private messageHandlers = new Map<string, (message: WebviewMessage) => void>();
 
   constructor(private context: vscode.ExtensionContext) {}
 
@@ -22,10 +23,14 @@ export class WebviewManager {
     onMessage: (message: WebviewMessage) => void,
     viewColumn: vscode.ViewColumn = vscode.ViewColumn.Active,
   ): vscode.WebviewPanel {
+    this.messageHandlers.set(id, onMessage);
+
     // Reuse existing panel
     const existing = this.panels.get(id);
     if (existing) {
+      existing.title = title;
       existing.reveal(viewColumn);
+      this.sendThemeInfo(existing);
       return existing;
     }
 
@@ -53,7 +58,7 @@ export class WebviewManager {
 
     // Handle messages from webview
     panel.webview.onDidReceiveMessage(
-      (message: WebviewMessage) => onMessage(message),
+      (message: WebviewMessage) => this.messageHandlers.get(id)?.(message),
       undefined,
       this.context.subscriptions,
     );
@@ -68,6 +73,7 @@ export class WebviewManager {
     // Cleanup on dispose
     panel.onDidDispose(() => {
       this.panels.delete(id);
+      this.messageHandlers.delete(id);
     });
 
     this.panels.set(id, panel);
@@ -76,6 +82,10 @@ export class WebviewManager {
     this.sendThemeInfo(panel);
 
     return panel;
+  }
+
+  hasPanel(id: string): boolean {
+    return this.panels.has(id);
   }
 
   /** Send a message to a webview panel */
@@ -92,6 +102,7 @@ export class WebviewManager {
     if (panel) {
       panel.dispose();
       this.panels.delete(id);
+      this.messageHandlers.delete(id);
     }
   }
 
@@ -101,6 +112,7 @@ export class WebviewManager {
       panel.dispose();
     }
     this.panels.clear();
+    this.messageHandlers.clear();
   }
 
   private sendThemeInfo(panel: vscode.WebviewPanel): void {

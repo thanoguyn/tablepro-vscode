@@ -25,6 +25,7 @@ interface QueryResult {
 }
 
 type CopyFormat = 'csv' | 'csv-noheader' | 'tsv' | 'tsv-noheader' | 'json' | 'xml' | 'insert' | 'update';
+type GridViewMode = 'table' | 'ddl';
 
 interface CellEdit {
   rowIndex: number;
@@ -52,6 +53,9 @@ interface ContextMenu {
   x: number;
   y: number;
   visIdx: number;
+  colIdx?: number;
+  copyText?: string;
+  copyLabel?: string;
 }
 
 interface GridLogEntry {
@@ -59,6 +63,7 @@ interface GridLogEntry {
   time: string;
   level: 'info' | 'success' | 'error';
   message: string;
+  query?: string;
 }
 
 interface QuickViewState {
@@ -107,9 +112,12 @@ export default function DataGrid() {
   const [filterText, setFilterText] = useState('');
   const [whereFilter, setWhereFilter] = useState('');
   const [showWhereInput, setShowWhereInput] = useState(false);
+  const [filterMatchCase, setFilterMatchCase] = useState(false);
+  const [filterUseRegex, setFilterUseRegex] = useState(false);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [hasMore, setHasMore] = useState(false); // limit+1 trick: server says there are more rows
+  const [loadingRows, setLoadingRows] = useState(false);
   const [selectedRow, setSelectedRow] = useState(-1);
   const [selectedCol, setSelectedCol] = useState(-1);
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
@@ -126,6 +134,7 @@ export default function DataGrid() {
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [copyStatus, setCopyStatus] = useState<{ kind: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [csvMenuOpen, setCsvMenuOpen] = useState(false);
+  const [tsvMenuOpen, setTsvMenuOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<GridLogEntry[]>([]);
   const [showLogDrawer, setShowLogDrawer] = useState(false);
   const [selectedLogId, setSelectedLogId] = useState<number | null>(null);
@@ -133,16 +142,24 @@ export default function DataGrid() {
   const [quickViewData, setQuickViewData] = useState<QuickViewState | null>(null);
   const [quickViewFilter, setQuickViewFilter] = useState('');
   const [expandedQuickValue, setExpandedQuickValue] = useState<{ name: string; type: string; value: string } | null>(null);
+  const [expandedLogQuery, setExpandedLogQuery] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<GridViewMode>('table');
+  const [ddlText, setDdlText] = useState('');
+  const [ddlLoading, setDdlLoading] = useState(false);
   const editInputRef = useRef<HTMLInputElement>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
   const csvMenuRef = useRef<HTMLDivElement>(null);
+  const tsvMenuRef = useRef<HTMLDivElement>(null);
   const hasDeletedRef = useRef(false);
+  const escStateRef = useRef<{ target: 'filter' | 'quickview' | null; count: number; time: number }>({ target: null, count: 0, time: 0 });
 
-  function addLog(level: GridLogEntry['level'], message: string) {
+  function addLog(level: GridLogEntry['level'], message: string, query?: string) {
     const entry: GridLogEntry = {
       id: Date.now() + Math.random(),
       time: new Date().toLocaleTimeString(),
       level,
       message,
+      query,
     };
     setLogEntries(prev => [entry, ...prev].slice(0, 100));
     setSelectedLogId(prev => prev ?? entry.id);
@@ -171,6 +188,7 @@ export default function DataGrid() {
         setTableName(msg.tableName || '');
         const nextPageSize = msg.pageSize || DEFAULT_PAGE_SIZE;
         const nextHasMore = !!msg.hasMore;
+        const nextLoadingRows = !!msg.loadingRows;
         setPageSize(nextPageSize);
         setRows(r.rows.map(row => ({
           status: 'unchanged', data: [...row], original: [...row], changedCols: new Set(),
@@ -184,18 +202,29 @@ export default function DataGrid() {
         setSelectionEnd(null);
         setTotalRows(msg.tableName && !nextHasMore ? r.rows.length : null);
         setHasMore(nextHasMore);
+        setLoadingRows(nextLoadingRows);
         setFilterText('');
         setFilterInput('');
+        setFilterMatchCase(false);
+        setFilterUseRegex(false);
+        setViewMode('table');
+        setDdlText('');
+        setDdlLoading(false);
         hasDeletedRef.current = false;
         setUndoStack([]);
         setRedoStack([]);
-        addLog('success', `Loaded ${r.rows.length.toLocaleString()} row${r.rows.length === 1 ? '' : 's'} in ${r.executionTime}ms`);
+        if (nextLoadingRows) {
+          addLog('info', 'Loading table rows...', msg.querySql);
+        } else {
+          addLog('success', `Loaded ${r.rows.length.toLocaleString()} row${r.rows.length === 1 ? '' : 's'} in ${r.executionTime}ms`, msg.querySql);
+        }
       } else if (msg.type === 'pageData') {
         const r = msg.data as QueryResult;
         const nextPageSize = msg.pageSize || pageSize || DEFAULT_PAGE_SIZE;
         const nextHasMore = !!msg.hasMore;
         setResult(r);
         setPageSize(nextPageSize);
+        setLoadingRows(false);
         setRows(r.rows.map(row => ({
           status: 'unchanged', data: [...row], original: [...row], changedCols: new Set(),
         })));
@@ -214,14 +243,22 @@ export default function DataGrid() {
         setSelectedRows(new Set());
         setSelectionStart(null);
         setSelectionEnd(null);
-        addLog('success', `Loaded page ${msg.page + 1}: ${r.rows.length.toLocaleString()} row${r.rows.length === 1 ? '' : 's'} in ${r.executionTime}ms`);
+        addLog('success', `Loaded page ${msg.page + 1}: ${r.rows.length.toLocaleString()} row${r.rows.length === 1 ? '' : 's'} in ${r.executionTime}ms`, msg.querySql);
       } else if (msg.type === 'totalRowsCount') {
         setTotalRows(msg.data.totalRows);
-        addLog('info', `Counted ${Number(msg.data.totalRows).toLocaleString()} total row${msg.data.totalRows === 1 ? '' : 's'}`);
+        addLog('info', `Counted ${Number(msg.data.totalRows).toLocaleString()} total row${msg.data.totalRows === 1 ? '' : 's'}`, msg.querySql);
       } else if (msg.type === 'rowSelected') {
         // Quick View auto-updated by extension, no local state change needed
       } else if (msg.type === 'copyResult') {
         showStatus(msg.success ? 'success' : 'error', msg.message || (msg.success ? 'Copied' : 'Copy failed'));
+      } else if (msg.type === 'ddlData') {
+        setDdlText(msg.data.ddl || '');
+        setDdlLoading(false);
+        addLog('info', 'Loaded table DDL');
+      } else if (msg.type === 'error') {
+        setDdlLoading(false);
+        setLoadingRows(false);
+        showStatus('error', msg.data?.message || 'Data grid error');
       }
     });
     return unsub;
@@ -243,6 +280,9 @@ export default function DataGrid() {
       }
       if (csvMenuRef.current && !csvMenuRef.current.contains(event.target as Node)) {
         setCsvMenuOpen(false);
+      }
+      if (tsvMenuRef.current && !tsvMenuRef.current.contains(event.target as Node)) {
+        setTsvMenuOpen(false);
       }
     };
     window.addEventListener('pointerdown', handlePointerDown, true);
@@ -273,10 +313,21 @@ export default function DataGrid() {
     }
 
     if (filterText) {
-      const lower = filterText.toLowerCase();
-      indices = indices.filter(idx =>
-        rows[idx].data.some(c => c !== null && String(c).toLowerCase().includes(lower))
-      );
+      let matcher: (value: unknown) => boolean;
+      if (filterUseRegex) {
+        try {
+          const regex = new RegExp(filterText, filterMatchCase ? '' : 'i');
+          matcher = value => value !== null && value !== undefined && regex.test(String(value));
+        } catch {
+          matcher = () => false;
+        }
+      } else if (filterMatchCase) {
+        matcher = value => value !== null && value !== undefined && String(value).includes(filterText);
+      } else {
+        const lower = filterText.toLowerCase();
+        matcher = value => value !== null && value !== undefined && String(value).toLowerCase().includes(lower);
+      }
+      indices = indices.filter(idx => rows[idx].data.some(matcher));
     }
 
     if (sortStates.length > 0 && !tableName) {
@@ -296,7 +347,7 @@ export default function DataGrid() {
     }
 
     return indices;
-  }, [rows, filterText, sortStates, tableName]);
+  }, [rows, filterText, filterMatchCase, filterUseRegex, sortStates, tableName]);
 
   const visibleRowsCount = useMemo(() => {
     if (filteredSortedIndices !== null) {
@@ -547,6 +598,8 @@ export default function DataGrid() {
   // ── Reload ──
   const handleReload = useCallback(() => {
     if (tableName) {
+      setTotalRows(null);
+      setLoadingRows(true);
       postMessage({ type: 'fetchPage', data: { page: 0, sortStates, whereFilter: whereFilter || undefined } });
     } else {
       postMessage({ type: 'reload' });
@@ -556,6 +609,7 @@ export default function DataGrid() {
   // ── Where Filter ──
   const handleApplyWhere = useCallback(() => {
     if (tableName) {
+      setLoadingRows(true);
       postMessage({ type: 'fetchPage', data: { page: 0, sortStates, whereFilter: whereFilter || undefined } });
     }
     setPage(0);
@@ -678,6 +732,7 @@ export default function DataGrid() {
 
   const handlePageChange = useCallback((nextPage: number) => {
     if (tableName) {
+      setLoadingRows(true);
       postMessage({ type: 'fetchPage', data: { page: nextPage, sortStates, whereFilter: whereFilter || undefined } });
     } else {
       setPage(nextPage);
@@ -719,6 +774,7 @@ export default function DataGrid() {
       }
 
       if (tableName) {
+        setLoadingRows(true);
         postMessage({ type: 'fetchPage', data: { page: 0, sortStates: next, whereFilter: whereFilter || undefined } });
       }
       return next;
@@ -769,11 +825,39 @@ export default function DataGrid() {
   }, [result, pageRows, selectedRow, selectedCol, pushUndo]);
 
   // ── Context Menu ──
-  const handleContextMenu = useCallback((e: React.MouseEvent, visIdx: number) => {
+  const handleContextMenu = useCallback((e: React.MouseEvent, visIdx: number, colIdx?: number) => {
     e.preventDefault();
     e.stopPropagation();
-    setContextMenu({ x: e.clientX, y: e.clientY, visIdx });
-  }, []);
+    let copyText: string | undefined;
+    let copyLabel: string | undefined;
+    if (colIdx !== undefined && !isCellInRange(visIdx, colIdx)) {
+      setSelectionStart({ row: visIdx, col: colIdx });
+      setSelectionEnd({ row: visIdx, col: colIdx });
+      setSelectedRow(visIdx);
+      setSelectedCol(colIdx);
+      setSelectedRows(new Set());
+      const cellVal = pageRows[visIdx]?.row.data[colIdx];
+      copyText = cellVal === null || cellVal === undefined ? '' : String(cellVal);
+      copyLabel = 'Copy cell value';
+    } else if (colIdx !== undefined && selectionStart && selectionEnd) {
+      const minRow = Math.min(selectionStart.row, selectionEnd.row);
+      const maxRow = Math.max(selectionStart.row, selectionEnd.row);
+      const minCol = Math.min(selectionStart.col, selectionEnd.col);
+      const maxCol = Math.max(selectionStart.col, selectionEnd.col);
+      const lines: string[] = [];
+      for (let r = minRow; r <= maxRow; r++) {
+        const rowCells: string[] = [];
+        for (let c = minCol; c <= maxCol; c++) {
+          const cellVal = pageRows[r]?.row.data[c];
+          rowCells.push(cellVal === null || cellVal === undefined ? '' : String(cellVal));
+        }
+        lines.push(rowCells.join('\t'));
+      }
+      copyText = lines.join('\n');
+      copyLabel = minRow === maxRow && minCol === maxCol ? 'Copy cell value' : 'Copy selected range';
+    }
+    setContextMenu({ x: e.clientX, y: e.clientY, visIdx, colIdx, copyText, copyLabel });
+  }, [isCellInRange, pageRows, selectionStart, selectionEnd]);
 
   const formatDelimitedCell = useCallback((value: unknown, separator: ',' | '\t') => {
     if (value === null || value === undefined) return separator === '\t' ? 'NULL' : '';
@@ -793,6 +877,38 @@ export default function DataGrid() {
     }
   }, []);
 
+  const getSelectionText = useCallback((fallbackVisIdx?: number, fallbackColIdx?: number) => {
+    if (!result) return '';
+
+    const hasRange = selectionStart && selectionEnd;
+    const startRow = hasRange ? Math.min(selectionStart!.row, selectionEnd!.row) : fallbackVisIdx;
+    const endRow = hasRange ? Math.max(selectionStart!.row, selectionEnd!.row) : fallbackVisIdx;
+    const startCol = hasRange ? Math.min(selectionStart!.col, selectionEnd!.col) : fallbackColIdx;
+    const endCol = hasRange ? Math.max(selectionStart!.col, selectionEnd!.col) : fallbackColIdx;
+
+    if (startRow === undefined || endRow === undefined || startCol === undefined || endCol === undefined) {
+      return '';
+    }
+
+    const lines: string[] = [];
+    for (let r = startRow; r <= endRow; r++) {
+      const rowCells: string[] = [];
+      for (let c = startCol; c <= endCol; c++) {
+        const cellVal = pageRows[r]?.row.data[c];
+        rowCells.push(cellVal === null || cellVal === undefined ? '' : String(cellVal));
+      }
+      lines.push(rowCells.join('\t'));
+    }
+    return lines.join('\n');
+  }, [result, selectionStart, selectionEnd, pageRows]);
+
+  const copySelection = useCallback((fallbackVisIdx?: number, fallbackColIdx?: number) => {
+    const text = getSelectionText(fallbackVisIdx, fallbackColIdx);
+    if (!text) return;
+    const isRange = !!selectionStart && !!selectionEnd && (selectionStart.row !== selectionEnd.row || selectionStart.col !== selectionEnd.col);
+    void writeClipboard(text, isRange ? 'Copied range' : 'Copied cell');
+  }, [getSelectionText, selectionStart, selectionEnd, writeClipboard]);
+
   const getAllClientRowsForCopy = useCallback(() => {
     if (filteredSortedIndices !== null) {
       return filteredSortedIndices
@@ -805,10 +921,11 @@ export default function DataGrid() {
       .filter(item => item.row.status !== 'deleted');
   }, [filteredSortedIndices, rows]);
 
-  const buildCsv = useCallback((items: { row: RowState; origIdx: number }[], includeHeader: boolean) => {
+  const buildDelimited = useCallback((items: { row: RowState; origIdx: number }[], includeHeader: boolean, format: 'csv' | 'tsv') => {
     if (!result) return '';
-    const header = result.columns.map(c => formatDelimitedCell(c.name, ',')).join(',');
-    const body = items.map(x => x.row.data.map(v => formatDelimitedCell(v, ',')).join(',')).join('\n');
+    const separator = format === 'tsv' ? '\t' : ',';
+    const header = result.columns.map(c => formatDelimitedCell(c.name, separator)).join(separator);
+    const body = items.map(x => x.row.data.map(v => formatDelimitedCell(v, separator)).join(separator)).join('\n');
     return includeHeader ? `${header}\n${body}` : body;
   }, [result, formatDelimitedCell]);
 
@@ -860,15 +977,17 @@ export default function DataGrid() {
     void writeClipboard(output, `Copied ${format.toUpperCase()}`);
   }, [result, pageRows, tableName, formatDelimitedCell, writeClipboard]);
 
-  const handleCopyCSV = useCallback((includeHeader = true, scope: 'page' | 'all' = 'page') => {
+  const handleCopyDelimited = useCallback((format: 'csv' | 'tsv', includeHeader = true, scope: 'page' | 'all' = 'page') => {
     if (!result) return;
     setCsvMenuOpen(false);
+    setTsvMenuOpen(false);
+    const label = format.toUpperCase();
     if (scope === 'all' && tableName) {
-      showStatus('info', 'Copy all CSV started...');
+      showStatus('info', `Copy all ${label} started...`);
       postMessage({
         type: 'copyTableData',
         data: {
-          format: 'csv',
+          format,
           includeHeader,
           sortStates,
           whereFilter: whereFilter || undefined,
@@ -878,9 +997,9 @@ export default function DataGrid() {
     }
 
     const items = scope === 'all' ? getAllClientRowsForCopy() : pageRows;
-    const text = buildCsv(items, includeHeader);
-    void writeClipboard(text, scope === 'all' ? 'Copied all rows as CSV' : 'Copied current page as CSV');
-  }, [result, tableName, sortStates, whereFilter, getAllClientRowsForCopy, pageRows, buildCsv, writeClipboard]);
+    const text = buildDelimited(items, includeHeader, format);
+    void writeClipboard(text, scope === 'all' ? `Copied all rows as ${label}` : `Copied current page as ${label}`);
+  }, [result, tableName, sortStates, whereFilter, getAllClientRowsForCopy, pageRows, buildDelimited, writeClipboard]);
 
   // ── Quick View ──
   const handleQuickView = useCallback((visIdx: number) => {
@@ -892,6 +1011,28 @@ export default function DataGrid() {
     }
   }, [result, pageRows]);
 
+  const switchViewMode = useCallback((mode: GridViewMode) => {
+    setViewMode(mode);
+    if (mode === 'table' && tableName) {
+      handleReload();
+    }
+    if (mode === 'ddl' && tableName && !ddlText && !ddlLoading) {
+      setDdlLoading(true);
+      postMessage({ type: 'getDDL' });
+    }
+  }, [tableName, ddlText, ddlLoading, handleReload]);
+
+  const closeAfterSecondEsc = useCallback((target: 'filter' | 'quickview', close: () => void) => {
+    const now = Date.now();
+    const previous = escStateRef.current;
+    const count = previous.target === target && now - previous.time < 900 ? previous.count + 1 : 1;
+    escStateRef.current = { target, count, time: now };
+    if (count >= 2) {
+      close();
+      escStateRef.current = { target: null, count: 0, time: 0 };
+    }
+  }, []);
+
   // ── Keyboard Navigation ──
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (editingCell) {
@@ -902,6 +1043,15 @@ export default function DataGrid() {
     }
     if (!result) return;
     switch (e.key) {
+      case 'Escape':
+        if (showWhereInput) {
+          e.preventDefault();
+          closeAfterSecondEsc('filter', () => setShowWhereInput(false));
+        } else if (showQuickViewSidebar) {
+          e.preventDefault();
+          closeAfterSecondEsc('quickview', () => setShowQuickViewSidebar(false));
+        }
+        break;
       case 'ArrowDown': {
         e.preventDefault();
         const nextR = Math.min(selectedRow + 1, pageRows.length - 1);
@@ -972,25 +1122,7 @@ export default function DataGrid() {
       case 'c':
         if (e.metaKey || e.ctrlKey) {
           if (selectedRow >= 0 && selectedCol >= 0) {
-            if (selectionStart && selectionEnd) {
-              const minRow = Math.min(selectionStart.row, selectionEnd.row);
-              const maxRow = Math.max(selectionStart.row, selectionEnd.row);
-              const minCol = Math.min(selectionStart.col, selectionEnd.col);
-              const maxCol = Math.max(selectionStart.col, selectionEnd.col);
-              const lines: string[] = [];
-              for (let r = minRow; r <= maxRow; r++) {
-                const rowCells: string[] = [];
-                for (let c = minCol; c <= maxCol; c++) {
-                  const cellVal = pageRows[r]?.row.data[c];
-                  rowCells.push(cellVal === null ? '' : String(cellVal));
-                }
-                lines.push(rowCells.join('\t'));
-              }
-              void writeClipboard(lines.join('\n'), 'Copied selection');
-            } else {
-              const v = pageRows[selectedRow]?.row.data[selectedCol];
-              void writeClipboard(v === null ? '' : String(v), 'Copied cell');
-            }
+            copySelection(selectedRow, selectedCol);
             e.preventDefault();
           }
         }
@@ -1002,7 +1134,25 @@ export default function DataGrid() {
         }
         break;
     }
-  }, [editingCell, result, selectedRow, selectedCol, pageRows, startEdit, commitEdit, cancelEdit, undo, redo, pushUndo, selectionStart, selectionEnd, pasteData, handleReload, writeClipboard]);
+  }, [editingCell, result, showWhereInput, showQuickViewSidebar, selectedRow, selectedCol, pageRows, startEdit, commitEdit, cancelEdit, undo, redo, pushUndo, pasteData, handleReload, copySelection, closeAfterSecondEsc]);
+
+  useEffect(() => {
+    const handleGlobalKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('input, textarea, [contenteditable="true"]')) {
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c' && selectedRow >= 0 && selectedCol >= 0) {
+        event.preventDefault();
+        copySelection(selectedRow, selectedCol);
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [selectedRow, selectedCol, copySelection]);
 
   if (!result) return <div className="datagrid-empty"><div className="empty-icon">📊</div><h3>No Results</h3><p className="text-muted">Run a query to see results here</p></div>;
   if (result.columns.length === 0) return <div className="datagrid-message"><div className="message-icon">✅</div><h3>{result.affectedRows} rows affected</h3><p className="text-muted">{result.executionTime}ms</p></div>;
@@ -1014,11 +1164,40 @@ export default function DataGrid() {
     .filter(item => item.col.name.toLowerCase().includes(quickViewFilter.toLowerCase()));
 
   return (
-    <div className="datagrid" onKeyDown={handleKeyDown} tabIndex={0}>
+    <div className="datagrid" ref={gridRef} onKeyDown={handleKeyDown} onMouseDown={() => gridRef.current?.focus()} tabIndex={0}>
       {/* Toolbar */}
       <div className="datagrid-toolbar">
         <div className="toolbar-left">
-          <input type="text" className="filter-input" placeholder="🔍 Filter rows..." value={filterInput} onChange={e => setFilterInput(e.target.value)} />
+          <button className="toolbar-btn icon-btn" onClick={handleReload} title="Reload (Ctrl+R)">⟳</button>
+          <button className={`toolbar-btn icon-btn ${showWhereInput ? 'btn-active' : ''}`} onClick={() => setShowWhereInput(v => !v)} title="Filter with WHERE SQL">⌕</button>
+          <button className="toolbar-btn icon-btn" onClick={() => postMessage({ type: 'openNewTab' })} title="Open New Query Tab">sql</button>
+          <div className="row-filter-wrap">
+            <input
+              type="text"
+              className="filter-input"
+              placeholder="Filter rows..."
+              value={filterInput}
+              onChange={e => setFilterInput(e.target.value)}
+            />
+            <div className="filter-mode-actions">
+              <button
+                className={`filter-mode-btn ${filterMatchCase ? 'active' : ''}`}
+                onClick={() => setFilterMatchCase(v => !v)}
+                title="Match case"
+                type="button"
+              >
+                Aa
+              </button>
+              <button
+                className={`filter-mode-btn ${filterUseRegex ? 'active' : ''}`}
+                onClick={() => setFilterUseRegex(v => !v)}
+                title="Use regular expression"
+                type="button"
+              >
+                .*
+              </button>
+            </div>
+          </div>
           {showWhereInput && (
             <div className="where-filter-group">
               <span className="where-label">WHERE</span>
@@ -1028,10 +1207,16 @@ export default function DataGrid() {
                 placeholder="e.g. id > 100 AND status = 'active'"
                 value={whereFilter}
                 onChange={e => setWhereFilter(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') handleApplyWhere(); if (e.key === 'Escape') setShowWhereInput(false); }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') handleApplyWhere();
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    closeAfterSecondEsc('filter', () => setShowWhereInput(false));
+                  }
+                }}
               />
-              <button className="toolbar-btn" onClick={handleApplyWhere}>Apply</button>
-              <button className="toolbar-btn" onClick={() => { setWhereFilter(''); setShowWhereInput(false); handleApplyWhere(); }}>✕</button>
+              <button className="toolbar-btn icon-btn" onClick={handleApplyWhere} title="Apply WHERE filter">✓</button>
+              <button className="toolbar-btn icon-btn" onClick={() => { setWhereFilter(''); setShowWhereInput(false); handleApplyWhere(); }} title="Clear WHERE filter">✕</button>
             </div>
           )}
           <span className="row-count">{visibleRowsCount.toLocaleString()} rows</span>
@@ -1044,30 +1229,38 @@ export default function DataGrid() {
               {changeStats.deleted > 0 && <span className="badge badge-deleted">{changeStats.deleted} deleted</span>}
             </div>
           )}
-          <button className="toolbar-btn" onClick={handleReload} title="Reload (Ctrl+R)">⟳ Reload</button>
-          <button className={`toolbar-btn ${showWhereInput ? 'btn-active' : ''}`} onClick={() => setShowWhereInput(v => !v)} title="Filter with WHERE SQL">⊿ Filter</button>
           {selectedRow >= 0 && (
-            <button className="toolbar-btn btn-quickview" onClick={() => handleQuickView(selectedRow)} title="Quick View Row">👁 Quick View</button>
+            <button className="toolbar-btn icon-btn btn-quickview" onClick={() => handleQuickView(selectedRow)} title="Quick View Row">👁</button>
           )}
-          <button className="toolbar-btn" onClick={addRow} title="Add Row">＋ Row</button>
+          <button className="toolbar-btn icon-btn" onClick={addRow} title="Add Row">＋</button>
           <div className="csv-copy-group" ref={csvMenuRef}>
-            <button className="toolbar-btn csv-main-btn" onClick={() => handleCopyCSV(true, 'page')} title="Copy current page as CSV with header">📋 CSV</button>
+            <button className="toolbar-btn csv-main-btn" onClick={() => handleCopyDelimited('csv', true, 'page')} title="Copy current page as CSV with header">CSV</button>
             <button className="toolbar-btn csv-menu-btn" onClick={() => setCsvMenuOpen(v => !v)} title="More CSV copy options">▾</button>
             {csvMenuOpen && (
               <div className="csv-copy-menu">
-                <button onClick={() => handleCopyCSV(false, 'page')}>Current page, no header</button>
-                <button onClick={() => handleCopyCSV(true, 'all')}>All rows with header</button>
-                <button onClick={() => handleCopyCSV(false, 'all')}>All rows, no header</button>
+                <button onClick={() => handleCopyDelimited('csv', false, 'page')}>Current page, no header</button>
+                <button onClick={() => handleCopyDelimited('csv', true, 'all')}>All rows with header</button>
+                <button onClick={() => handleCopyDelimited('csv', false, 'all')}>All rows, no header</button>
               </div>
             )}
           </div>
-          <button className="toolbar-btn" onClick={() => postMessage({ type: 'openNewTab' })} title="Open New Query Tab">＋ Tab</button>
-          <button className="toolbar-btn" onClick={undo} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">↩</button>
-          <button className="toolbar-btn" onClick={redo} disabled={redoStack.length === 0} title="Redo (Ctrl+Shift+Z)">↪</button>
+          <div className="csv-copy-group" ref={tsvMenuRef}>
+            <button className="toolbar-btn csv-main-btn" onClick={() => handleCopyDelimited('tsv', true, 'page')} title="Copy current page as TSV with header">TSV</button>
+            <button className="toolbar-btn csv-menu-btn" onClick={() => setTsvMenuOpen(v => !v)} title="More TSV copy options">▾</button>
+            {tsvMenuOpen && (
+              <div className="csv-copy-menu">
+                <button onClick={() => handleCopyDelimited('tsv', false, 'page')}>Current page, no header</button>
+                <button onClick={() => handleCopyDelimited('tsv', true, 'all')}>All rows with header</button>
+                <button onClick={() => handleCopyDelimited('tsv', false, 'all')}>All rows, no header</button>
+              </div>
+            )}
+          </div>
+          <button className="toolbar-btn icon-btn" onClick={undo} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">↩</button>
+          <button className="toolbar-btn icon-btn" onClick={redo} disabled={redoStack.length === 0} title="Redo (Ctrl+Shift+Z)">↪</button>
           {hasChanges && <>
-            <button className="toolbar-btn btn-preview" onClick={handlePreviewSQL}>👁 SQL</button>
-            <button className="toolbar-btn btn-discard" onClick={handleDiscard}>✕ Discard</button>
-            <button className="toolbar-btn btn-save" onClick={handleSave}>💾 Save</button>
+            <button className="toolbar-btn icon-btn btn-preview" onClick={handlePreviewSQL} title="Preview SQL">👁</button>
+            <button className="toolbar-btn icon-btn btn-discard" onClick={handleDiscard} title="Discard Changes">✕</button>
+            <button className="toolbar-btn icon-btn btn-save" onClick={handleSave} title="Save Changes">💾</button>
           </>}
           <span className="execution-time">{result.executionTime}ms</span>
         </div>
@@ -1075,83 +1268,109 @@ export default function DataGrid() {
 
       {/* Table */}
       <div className="datagrid-main">
-        <div className="datagrid-table-wrapper">
-          <table className="datagrid-table">
-            <thead>
-              <tr>
-                <th className="row-num-header">#</th>
-                {result.columns.map((col, i) => {
-                  const colSort = sortStates.find(s => s.column === i);
-                  const sortOrder = sortStates.findIndex(s => s.column === i) + 1;
-                  return (
-                    <th key={i} className={`column-header-th ${colSort ? `sorted-${colSort.direction}` : ''}`}
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={(e) => selectColumn(i)}
-                      title={`${col.name} (${col.type}) — Click to select column, Ctrl+click sort to multi-sort`}>
-                      <div className="header-content-wrapper">
-                        <span className="col-name">{col.isPrimaryKey && <span className="pk-icon">🔑</span>}{col.name}</span>
-                        <button className="sort-action-btn" onClick={(e) => toggleSort(i, e)} title="Sort (hold Ctrl for multi-sort)">
-                          {colSort ? (colSort.direction === 'asc' ? '▲' : '▼') : '↕'}
-                          {sortStates.length > 1 && colSort && <sup className="sort-order">{sortOrder}</sup>}
-                        </button>
-                      </div>
-                      <span className="col-type">{formatColumnType(col)}</span>
-                    </th>
-                  );
-                })}
-                <th className="row-actions-header">⋯</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pageRows.map((item, visIdx) => {
-                const absIdx = page * pageSize + visIdx;
-                const isRowSelected = selectedRows.has(visIdx);
-                const rowClass = `row-${item.row.status}${isRowSelected ? ' selected' : ''}${selectedRows.size > 1 && selectedRows.has(visIdx) ? ' multi-selected' : ''}`;
-                return (
-                  <tr key={item.origIdx} className={rowClass}
-                    onClick={(e) => handleRowClick(visIdx, e)}
-                    onContextMenu={(e) => handleContextMenu(e, visIdx)}>
-                    <td className="row-num" onClick={(e) => { e.stopPropagation(); selectRowAllColumns(visIdx, e); }}>
-                      {item.row.status === 'added' ? '✦' : absIdx + 1}
-                    </td>
-                    {item.row.data.map((cell, ci) => {
-                      const isEditing = editingCell?.row === visIdx && editingCell?.col === ci;
-                      const isChanged = item.row.changedCols.has(ci);
-                      const isInSelection = isCellInRange(visIdx, ci);
-                      const isFocused = selectedRow === visIdx && selectedCol === ci;
-                      const cellClass = `cell${isFocused ? ' cell-selected' : ''}${isInSelection ? ' cell-selected-range' : ''}${cell === null ? ' cell-null' : ''}${isChanged ? ' cell-changed' : ''}${isEditing ? ' cell-editing' : ''} cell-type-${result.columns[ci]?.normalizedType || 'unknown'}`;
-                      return (
-                        <td key={ci} className={cellClass}
-                          onMouseDown={(e) => { if (!e.shiftKey) { setSelectedCol(ci); } handleCellMouseDown(visIdx, ci, e); }}
-                          onMouseEnter={() => handleCellMouseEnter(visIdx, ci)}
-                          onClick={(e) => e.stopPropagation()}
-                          onDoubleClick={() => startEdit(visIdx, ci)}
-                          title={cell === null ? 'NULL' : String(cell)}>
-                          {isEditing ? (
-                            <input ref={editInputRef} className="cell-editor" value={editValue}
-                              onChange={e => setEditValue(e.target.value)}
-                              onBlur={commitEdit}
-                              onKeyDown={e => {
-                                if (e.key === 'Escape') cancelEdit();
-                                else if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
-                              }} />
-                          ) : renderCell(cell, result.columns[ci])}
-                        </td>
-                      );
-                    })}
-                    <td className="row-actions">
-                      <button className="row-action-btn" onClick={e => { e.stopPropagation(); handleQuickView(visIdx); }} title="Quick View">👁</button>
-                      <button className="row-action-btn" onClick={e => { e.stopPropagation(); duplicateRow(visIdx); }} title="Duplicate">⧉</button>
-                      <button className="row-action-btn row-action-delete" onClick={e => { e.stopPropagation(); deleteRow(visIdx); }} title="Delete">✕</button>
+        {viewMode === 'ddl' ? (
+          <div className="ddl-view">
+            {ddlLoading ? (
+              <div className="ddl-state">Loading DDL...</div>
+            ) : ddlText ? (
+              <pre className="ddl-code-view">{ddlText}</pre>
+            ) : (
+              <div className="ddl-state">No DDL available</div>
+            )}
+          </div>
+        ) : (
+          <div className="datagrid-table-wrapper">
+            <table className="datagrid-table">
+              <thead>
+                <tr>
+                  <th className="row-num-header">#</th>
+                  {result.columns.map((col, i) => {
+                    const colSort = sortStates.find(s => s.column === i);
+                    const sortOrder = sortStates.findIndex(s => s.column === i) + 1;
+                    return (
+                      <th key={i} className={`column-header-th ${colSort ? `sorted-${colSort.direction}` : ''}`}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={(e) => selectColumn(i)}
+                        title={`${col.name} (${col.type}) — Click to select column, Ctrl+click sort to multi-sort`}>
+                        <div className="header-content-wrapper">
+                          <span className="col-name">{col.isPrimaryKey && <span className="pk-icon">🔑</span>}{col.name}</span>
+                          <button className="sort-action-btn" onClick={(e) => toggleSort(i, e)} title="Sort (hold Ctrl for multi-sort)">
+                            {colSort ? (colSort.direction === 'asc' ? '▲' : '▼') : '↕'}
+                            {sortStates.length > 1 && colSort && <sup className="sort-order">{sortOrder}</sup>}
+                          </button>
+                        </div>
+                        <span className="col-type">{formatColumnType(col)}</span>
+                      </th>
+                    );
+                  })}
+                  <th className="row-actions-header">⋯</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loadingRows ? (
+                  <tr>
+                    <td className="loading-row" colSpan={result.columns.length + 2}>
+                      <span className="loading-spinner" />
+                      Loading rows...
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                ) : pageRows.length === 0 ? (
+                  <tr>
+                    <td className="loading-row" colSpan={result.columns.length + 2}>
+                      No rows
+                    </td>
+                  </tr>
+                ) : pageRows.map((item, visIdx) => {
+                  const absIdx = page * pageSize + visIdx;
+                  const isRowSelected = selectedRows.has(visIdx);
+                  const rowClass = `row-${item.row.status}${isRowSelected ? ' selected' : ''}${selectedRows.size > 1 && selectedRows.has(visIdx) ? ' multi-selected' : ''}`;
+                  return (
+                    <tr key={item.origIdx} className={rowClass}
+                      onClick={(e) => handleRowClick(visIdx, e)}
+                      onContextMenu={(e) => handleContextMenu(e, visIdx)}>
+                      <td className="row-num" onClick={(e) => { e.stopPropagation(); selectRowAllColumns(visIdx, e); }}>
+                        {item.row.status === 'added' ? '✦' : absIdx + 1}
+                      </td>
+                      {item.row.data.map((cell, ci) => {
+                        const isEditing = editingCell?.row === visIdx && editingCell?.col === ci;
+                        const isChanged = item.row.changedCols.has(ci);
+                        const isInSelection = isCellInRange(visIdx, ci);
+                        const isFocused = selectedRow === visIdx && selectedCol === ci;
+                        const cellClass = `cell${isFocused ? ' cell-selected' : ''}${isInSelection ? ' cell-selected-range' : ''}${cell === null ? ' cell-null' : ''}${isChanged ? ' cell-changed' : ''}${isEditing ? ' cell-editing' : ''} cell-type-${result.columns[ci]?.normalizedType || 'unknown'}`;
+                        return (
+                          <td key={ci} className={cellClass}
+                            onMouseDown={(e) => { if (!e.shiftKey) { setSelectedCol(ci); } handleCellMouseDown(visIdx, ci, e); }}
+                            onMouseEnter={() => handleCellMouseEnter(visIdx, ci)}
+                            onClick={(e) => e.stopPropagation()}
+                            onContextMenu={(e) => handleContextMenu(e, visIdx, ci)}
+                            onDoubleClick={() => startEdit(visIdx, ci)}
+                            title={cell === null ? 'NULL' : String(cell)}>
+                            {isEditing ? (
+                              <input ref={editInputRef} className="cell-editor" value={editValue}
+                                onChange={e => setEditValue(e.target.value)}
+                                onBlur={commitEdit}
+                                onKeyDown={e => {
+                                  if (e.key === 'Escape') cancelEdit();
+                                  else if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
+                                }} />
+                            ) : renderCell(cell, result.columns[ci])}
+                          </td>
+                        );
+                      })}
+                      <td className="row-actions">
+                        <button className="row-action-btn" onClick={e => { e.stopPropagation(); handleQuickView(visIdx); }} title="Quick View">👁</button>
+                        <button className="row-action-btn" onClick={e => { e.stopPropagation(); duplicateRow(visIdx); }} title="Duplicate">⧉</button>
+                        <button className="row-action-btn row-action-delete" onClick={e => { e.stopPropagation(); deleteRow(visIdx); }} title="Delete">✕</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
 
-        {showQuickViewSidebar && quickViewData && (
+        {viewMode === 'table' && showQuickViewSidebar && quickViewData && (
           <aside className="datagrid-quickview-sidebar">
             <div className="dqv-header">
               <div>
@@ -1197,6 +1416,16 @@ export default function DataGrid() {
       {/* Context Menu */}
       {contextMenu && (
         <div className="context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onClick={e => e.stopPropagation()}>
+          {contextMenu.colIdx !== undefined && (
+            <>
+              <div className="context-menu-item" onClick={() => {
+                const text = contextMenu.copyText ?? getSelectionText(contextMenu.visIdx, contextMenu.colIdx);
+                if (text !== undefined) void writeClipboard(text, contextMenu.copyLabel || 'Copied value');
+                setContextMenu(null);
+              }}>📋 {contextMenu.copyLabel || 'Copy value'}</div>
+              <div className="context-menu-separator" />
+            </>
+          )}
           <div className="context-menu-item" onClick={() => { copyRowAs('csv', contextMenu.visIdx); setContextMenu(null); }}>📋 Copy as CSV (with header)</div>
           <div className="context-menu-item" onClick={() => { copyRowAs('csv-noheader', contextMenu.visIdx); setContextMenu(null); }}>📋 Copy as CSV (no header)</div>
           <div className="context-menu-item" onClick={() => { copyRowAs('tsv', contextMenu.visIdx); setContextMenu(null); }}>📋 Copy as TSV (with header)</div>
@@ -1216,25 +1445,60 @@ export default function DataGrid() {
       {/* Pagination */}
       {(page > 0 || hasMore || pageRows.length === pageSize || tableName) && (
         <div className="datagrid-pagination">
-          <button className="page-btn" disabled={page === 0} onClick={() => handlePageChange(0)}>⟨⟨</button>
-          <button className="page-btn" disabled={page === 0} onClick={() => handlePageChange(page - 1)}>⟨</button>
-          <span className="page-info">
-            Page {page + 1}{totalRows !== null ? ` / ${Math.max(1, Math.ceil(totalRows / pageSize))}` : (tableName ? '' : ` / ${totalPages}`)}
-            {totalRows !== null
-              ? ` (${totalRows.toLocaleString()} rows)`
-              : tableName
-                ? <> (<span style={{ cursor: 'pointer', textDecoration: 'underline dotted', color: 'var(--vscode-textLink-foreground)' }} onClick={handleCountRows} title="Click to count all records">count?</span>)</>  
-                : ` (${visibleRowsCount.toLocaleString()} rows)`}
-          </span>
-          <button className="page-btn"
-            disabled={tableName ? !hasMore : (page + 1) * pageSize >= visibleRowsCount}
-            onClick={() => handlePageChange(page + 1)}>⟩</button>
+          <div className="pagination-left">
+            {tableName && (
+              <div className="view-toggle" role="group" aria-label="Toggle table or DDL view">
+                <button className={`view-toggle-btn ${viewMode === 'table' ? 'active' : ''}`} onClick={() => switchViewMode('table')} title="Table view">▦</button>
+                <button className={`view-toggle-btn ${viewMode === 'ddl' ? 'active' : ''}`} onClick={() => switchViewMode('ddl')} title="DDL view">{'{}'}</button>
+              </div>
+            )}
+          </div>
+          <div className="pagination-center">
+            <button className="page-btn" disabled={loadingRows || page === 0 || viewMode === 'ddl'} onClick={() => handlePageChange(0)}>⟨⟨</button>
+            <button className="page-btn" disabled={loadingRows || page === 0 || viewMode === 'ddl'} onClick={() => handlePageChange(page - 1)}>⟨</button>
+            <span className="page-info">
+              {viewMode === 'ddl' ? 'DDL' : (
+                <>
+                  {loadingRows ? 'Loading ' : ''}Page {page + 1}
+                  {tableName ? (
+                    <button className="page-count-link" onClick={handleCountRows} title="Recount rows and total pages">
+                      {totalRows !== null ? ` / ${Math.max(1, Math.ceil(totalRows / pageSize))}` : ' / ?'}
+                    </button>
+                  ) : ` / ${totalPages}`}
+                  {totalRows !== null
+                    ? ` (${totalRows.toLocaleString()} rows)`
+                    : tableName
+                      ? <> (<span style={{ cursor: 'pointer', textDecoration: 'underline dotted', color: 'var(--vscode-textLink-foreground)' }} onClick={handleCountRows} title="Click to count all records">count?</span>)</>  
+                      : ` (${visibleRowsCount.toLocaleString()} rows)`}
+                </>
+              )}
+            </span>
+            <button className="page-btn"
+              disabled={loadingRows || viewMode === 'ddl' || (tableName ? !hasMore : (page + 1) * pageSize >= visibleRowsCount)}
+              onClick={() => handlePageChange(page + 1)}>⟩</button>
+          </div>
+          <div className="pagination-right" />
         </div>
       )}
       <button className={`datagrid-log-strip ${latestLog?.level || 'info'}`} onClick={() => setShowLogDrawer(v => !v)} title="Toggle logs">
         <span className="log-toggle">{showLogDrawer ? '▾' : '▸'}</span>
         <span className="log-time">{latestLog?.time || '--:--:--'}</span>
         <span className="log-message">{latestLog?.message || 'No logs yet'}</span>
+        {latestLog?.query && (
+          <>
+            <span className="log-query-separator">-</span>
+            <span
+              className="log-query-inline"
+              title="Open query"
+              onClick={e => {
+                e.stopPropagation();
+                setExpandedLogQuery(latestLog.query || '');
+              }}
+            >
+              {latestLog.query}
+            </span>
+          </>
+        )}
       </button>
       {showLogDrawer && (
         <div className="datagrid-log-drawer">
@@ -1263,6 +1527,11 @@ export default function DataGrid() {
                       <span className="log-detail-time">{selectedLog.time}</span>
                     </div>
                     <pre className="log-detail-message">{selectedLog.message}</pre>
+                    {selectedLog.query && (
+                      <button className="log-detail-query" onClick={() => setExpandedLogQuery(selectedLog.query || '')}>
+                        {selectedLog.query}
+                      </button>
+                    )}
                   </>
                 )}
               </div>
@@ -1283,6 +1552,23 @@ export default function DataGrid() {
             <pre className="dqv-modal-content">{expandedQuickValue.value}</pre>
             <div className="dqv-modal-actions">
               <button onClick={() => void writeClipboard(expandedQuickValue.value, 'Copied full value')}>Copy</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {expandedLogQuery && (
+        <div className="dqv-modal-backdrop" onClick={() => setExpandedLogQuery(null)}>
+          <div className="query-modal" onClick={e => e.stopPropagation()}>
+            <div className="dqv-modal-header">
+              <div>
+                <strong>Query</strong>
+                <span>SQL</span>
+              </div>
+              <button onClick={() => setExpandedLogQuery(null)} title="Close">x</button>
+            </div>
+            <pre className="dqv-modal-content">{expandedLogQuery}</pre>
+            <div className="dqv-modal-actions">
+              <button onClick={() => void writeClipboard(expandedLogQuery, 'Copied query')}>Copy</button>
             </div>
           </div>
         </div>

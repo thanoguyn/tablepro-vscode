@@ -6,6 +6,7 @@ import { glob } from 'glob';
 import { v4 as uuidv4 } from 'uuid';
 import { ConnectionManager } from './core/connection/ConnectionManager';
 import { ConnectionTreeProvider } from './views/sidebar/ConnectionTreeProvider';
+import { DatabaseTreeProvider } from './views/sidebar/DatabaseTreeProvider';
 import { SchemaTreeProvider } from './views/sidebar/SchemaTreeProvider';
 import { Logger, LogEntry } from './core/utils/Logger';
 import { WebviewManager } from './views/webview/WebviewManager';
@@ -31,6 +32,7 @@ import { ImportExportService } from './core/utils/ImportExportService';
 let connectionManager: ConnectionManager;
 let webviewManager: WebviewManager;
 let connectionTreeProvider: ConnectionTreeProvider;
+let databaseTreeProvider: DatabaseTreeProvider;
 let schemaTreeProvider: SchemaTreeProvider;
 let schemaProvider: SchemaProvider;
 let queryEngine: QueryEngine;
@@ -40,6 +42,7 @@ let queryDocContexts: Record<string, { connectionId: string, connectionName: str
 let queryContextStatusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext;
 let sqlCodeLensProvider: SQLCodeLensProvider | undefined;
+let lastTableOpenClick: { key: string; timestamp: number } | undefined;
 
 async function getCurrentDatabaseName(connectionId: string): Promise<string> {
   const activeConn = connectionManager.getActiveConnection(connectionId);
@@ -83,6 +86,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
   schemaProvider = new SchemaProvider(connectionManager);
   connectionTreeProvider = new ConnectionTreeProvider(connectionManager);
+  databaseTreeProvider = new DatabaseTreeProvider(connectionManager);
   schemaTreeProvider = new SchemaTreeProvider(connectionManager);
 
   queryDocContexts = context.workspaceState.get<Record<string, { connectionId: string, connectionName: string, database: string }>>('queryDocContexts', {});
@@ -102,6 +106,13 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.window.createTreeView('tablepro.connections', {
       treeDataProvider: connectionTreeProvider,
+      showCollapseAll: true,
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.window.createTreeView('tablepro.databases', {
+      treeDataProvider: databaseTreeProvider,
       showCollapseAll: true,
     }),
   );
@@ -237,11 +248,31 @@ export function activate(context: vscode.ExtensionContext) {
 
         const config = (await connectionManager.getSavedConnections()).find(c => c.id === id);
         vscode.window.showInformationMessage(`Connected to ${config?.name || 'database'}`);
+        databaseTreeProvider.refresh();
         schemaTreeProvider.clearCache();
         schemaTreeProvider.refresh();
         schemaProvider.refresh();
       } catch (err) {
         vscode.window.showErrorMessage(`Connection failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.selectConnection', async (idOrItem?: any) => {
+      const id = typeof idOrItem === 'string' ? idOrItem : idOrItem?.config?.id;
+      if (!id) { return; }
+
+      try {
+        await connectionManager.selectConnection(id);
+        databaseTreeProvider.refresh();
+        schemaTreeProvider.clearCache();
+        schemaTreeProvider.refresh();
+        schemaProvider.refresh();
+        updateStatusBar();
+        codeLensProvider.refresh();
+      } catch (err) {
+        vscode.window.showErrorMessage(`Failed to select connection: ${err instanceof Error ? err.message : err}`);
       }
     }),
   );
@@ -560,17 +591,28 @@ export function activate(context: vscode.ExtensionContext) {
   // ── Schema Commands ──
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('tablepro.openTable', async (connectionId?: string, tableInfo?: any) => {
+    vscode.commands.registerCommand('tablepro.openTable', async (connectionId?: string, tableInfo?: any, options?: { pinned?: boolean }) => {
       if (!connectionId || !tableInfo) { return; }
 
       const driver = connectionManager.getDriver(connectionId);
       if (!driver) { vscode.window.showErrorMessage('Not connected.'); return; }
 
+      let openedPanelId: string | undefined;
       try {
         const table = tableInfo.name;
         const schema = tableInfo.schema;
+        const openKey = `${connectionId}:${schema || ''}:${table}`;
+        const now = Date.now();
+        const isDoubleClick = lastTableOpenClick?.key === openKey && now - lastTableOpenClick.timestamp < 650;
+        lastTableOpenClick = { key: openKey, timestamp: now };
+        const pinned = options?.pinned === true || isDoubleClick;
         const config = vscode.workspace.getConfiguration('tablepro');
         const pageSize = config.get<number>('defaultRowsPerPage', 100);
+        const dbName = await getCurrentDatabaseName(connectionId);
+        const panelId = pinned
+          ? `data-grid-${connectionId}-${dbName || 'default'}-${schema || 'default'}-${table}-${Date.now()}`
+          : 'data-grid-preview';
+        openedPanelId = panelId;
 
         const escapedTable = schema
           ? `${driver.escapeIdentifier(schema)}.${driver.escapeIdentifier(table)}`
@@ -578,45 +620,106 @@ export function activate(context: vscode.ExtensionContext) {
 
         // Use limit+1 trick: fetch one extra row to know if there are more pages
         const sql = `SELECT * FROM ${escapedTable} ${driver.paginationSQL(pageSize + 1, 0)}`;
+
+        let columnInfos: any[] = [];
+        try {
+          columnInfos = await driver.getColumns(table, schema);
+        } catch {
+          columnInfos = [];
+        }
+
+        if (columnInfos.length > 0) {
+          const loadingResult: QueryResult = {
+            columns: columnInfos.map(col => ({
+              name: col.name,
+              type: col.type,
+              normalizedType: col.normalizedType,
+              nullable: col.nullable,
+              isPrimaryKey: col.isPrimaryKey,
+              isAutoIncrement: col.isAutoIncrement,
+              defaultValue: col.defaultValue ?? null,
+              maxLength: col.maxLength,
+              precision: col.precision,
+              scale: col.scale,
+              rawType: col.type,
+              table,
+              schema,
+            })),
+            rows: [],
+            affectedRows: 0,
+            executionTime: 0,
+            truncated: false,
+            messages: [],
+          };
+
+          showResultsInDataGrid(table, loadingResult, table, schema, connectionId, dbName, pageSize, false, {
+            pinned,
+            panelId,
+            querySql: sql,
+            loadingRows: true,
+          });
+        }
+
         const result = await driver.query(sql);
 
         // Enrich column types with schema info
         let enrichedResult = serializeQueryResult(result);
-        try {
-          const columnInfos = await driver.getColumns(table, schema);
-          if (columnInfos.length > 0) {
-            const infoMap = new Map(columnInfos.map(ci => [ci.name, ci]));
-            enrichedResult = {
-              ...enrichedResult,
-              columns: result.columns.map(col => {
-                const info = infoMap.get(col.name);
-                if (!info) return col;
-                return {
-                  ...col,
-                  type: info.type,           // e.g. varchar(255)
-                  rawType: info.type,
-                  normalizedType: info.normalizedType,
-                  maxLength: info.maxLength,
-                  precision: info.precision,
-                  scale: info.scale,
-                  isPrimaryKey: info.isPrimaryKey,
-                  isAutoIncrement: info.isAutoIncrement,
-                  nullable: info.nullable,
-                };
-              }),
-            };
-          }
-        } catch (e) {
-          // ignore enrichment failures, use raw types
+        if (columnInfos.length > 0) {
+          const infoMap = new Map(columnInfos.map(ci => [ci.name, ci]));
+          enrichedResult = {
+            ...enrichedResult,
+            columns: enrichedResult.columns.length > 0
+              ? enrichedResult.columns.map(col => {
+                  const info = infoMap.get(col.name);
+                  if (!info) return col;
+                  return {
+                    ...col,
+                    type: info.type,
+                    rawType: info.type,
+                    normalizedType: info.normalizedType,
+                    maxLength: info.maxLength,
+                    precision: info.precision,
+                    scale: info.scale,
+                    isPrimaryKey: info.isPrimaryKey,
+                    isAutoIncrement: info.isAutoIncrement,
+                    nullable: info.nullable,
+                  };
+                })
+              : columnInfos.map(col => ({
+                  name: col.name,
+                  type: col.type,
+                  normalizedType: col.normalizedType,
+                  nullable: col.nullable,
+                  isPrimaryKey: col.isPrimaryKey,
+                  isAutoIncrement: col.isAutoIncrement,
+                  defaultValue: col.defaultValue ?? null,
+                  maxLength: col.maxLength,
+                  precision: col.precision,
+                  scale: col.scale,
+                  rawType: col.type,
+                  table,
+                  schema,
+                })),
+          };
         }
 
         // If we got pageSize+1 rows, trim back to pageSize and note there are more
         const hasMore = enrichedResult.rows.length > pageSize;
         if (hasMore) enrichedResult = { ...enrichedResult, rows: enrichedResult.rows.slice(0, pageSize) };
 
-        const dbName = await getCurrentDatabaseName(connectionId);
-        showResultsInDataGrid(table, enrichedResult, table, schema, connectionId, dbName, pageSize, hasMore);
+        showResultsInDataGrid(table, enrichedResult, table, schema, connectionId, dbName, pageSize, hasMore, {
+          pinned,
+          panelId,
+          querySql: sql,
+          loadingRows: false,
+        });
       } catch (err) {
+        if (openedPanelId) {
+          webviewManager.postMessage(openedPanelId, {
+            type: 'error',
+            data: { message: `Failed to open table: ${err instanceof Error ? err.message : String(err)}` },
+          });
+        }
         vscode.window.showErrorMessage(`Failed to open table: ${err}`);
       }
     }),
@@ -1140,7 +1243,14 @@ export function activate(context: vscode.ExtensionContext) {
       }
 
       try {
-        await driver.switchDatabase(dbName);
+        if (connectionManager.activeConnectionId !== connectionId) {
+          await connectionManager.selectConnection(connectionId);
+        }
+
+        const currentDb = await driver.getCurrentDatabase().catch(() => '');
+        if (currentDb !== dbName) {
+          await driver.switchDatabase(dbName);
+        }
         const editor = vscode.window.activeTextEditor;
         if (editor && editor.document.languageId === 'sql') {
           const uri = editor.document.uri.toString();
@@ -1150,6 +1260,7 @@ export function activate(context: vscode.ExtensionContext) {
             await context.workspaceState.update('queryDocContexts', queryDocContexts);
           }
         }
+        databaseTreeProvider.refresh();
         schemaTreeProvider.clearCache();
         schemaTreeProvider.refresh();
         schemaProvider.refresh();
@@ -1289,6 +1400,11 @@ export function activate(context: vscode.ExtensionContext) {
     return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   }
 
+  function tsvEscape(value: unknown): string {
+    if (value === null || value === undefined) return '';
+    return String(value).replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
+  }
+
   function openConnectionForm(config: ConnectionConfig) {
     const panelId = `connection-form-${config.id || 'new'}`;
     const title = config.name ? `Edit: ${config.name}` : 'New Connection';
@@ -1338,6 +1454,7 @@ export function activate(context: vscode.ExtensionContext) {
         queryResultsViewProvider.postMessage({
           type: 'queryResult',
           data: serializedResult,
+          querySql: sql,
           pageSize: vscode.workspace.getConfiguration('tablepro').get<number>('defaultRowsPerPage', 1000),
         } as any);
       } else {
@@ -1358,15 +1475,20 @@ export function activate(context: vscode.ExtensionContext) {
     connectionId?: string,
     database?: string,
     pageSizeOverride?: number,
-    initialHasMore = false
+    initialHasMore = false,
+    options?: { pinned?: boolean; panelId?: string; querySql?: string; loadingRows?: boolean }
   ) {
-    const panelId = `data-grid-${Date.now()}`;
+    const panelId = options?.panelId || (options?.pinned
+      ? `data-grid-${connectionId || 'active'}-${database || 'default'}-${schemaName || 'default'}-${tableName || Date.now()}-${Date.now()}`
+      : 'data-grid-preview');
     const connId = connectionId || connectionManager.activeConnectionId;
     const pageSizeForGrid = pageSizeOverride || vscode.workspace.getConfiguration('tablepro').get<number>('defaultRowsPerPage', 1000);
+    const messagePayload = { type: 'queryResult', data: result, tableName, schemaName, pageSize: pageSizeForGrid, hasMore: initialHasMore, querySql: options?.querySql, loadingRows: !!options?.loadingRows } as any;
+    const panelExists = webviewManager.hasPanel(panelId);
 
-    webviewManager.showPanel(panelId, `📊 ${title}`, 'dataGrid', async (message: WebviewMessage) => {
+    webviewManager.showPanel(panelId, options?.pinned ? `📊 ${title}` : `📊 Preview: ${title}`, 'dataGrid', async (message: WebviewMessage) => {
       if (message.type === 'ready') {
-        webviewManager.postMessage(panelId, { type: 'queryResult', data: result, tableName, schemaName, pageSize: pageSizeForGrid, hasMore: initialHasMore } as any);
+        webviewManager.postMessage(panelId, messagePayload);
       }
 
       if (message.type === 'rowSelected') {
@@ -1393,10 +1515,26 @@ export function activate(context: vscode.ExtensionContext) {
             const total = Number(firstRow?.total ?? firstRow?.TOTAL ?? firstRow?.[0] ?? 0);
             webviewManager.postMessage(panelId, {
               type: 'totalRowsCount',
-              data: { totalRows: total }
-            });
+              data: { totalRows: total },
+              querySql: countSql,
+            } as any);
           } catch (err) {
             vscode.window.showErrorMessage(`Failed to count table rows: ${err}`);
+          }
+        }
+      }
+
+      if (message.type === 'getDDL' && connId && tableName) {
+        const driver = connectionManager.getDriver(connId);
+        if (driver) {
+          try {
+            const ddl = await getTableDDL(driver, tableName, schemaName);
+            webviewManager.postMessage(panelId, { type: 'ddlData', data: { ddl } });
+          } catch (err) {
+            webviewManager.postMessage(panelId, {
+              type: 'error',
+              data: { message: `Failed to load DDL: ${err instanceof Error ? err.message : String(err)}` },
+            });
           }
         }
       }
@@ -1444,8 +1582,13 @@ export function activate(context: vscode.ExtensionContext) {
               hasMore,
               pageSize,
               totalRows: hasMore ? undefined : (offset + trimmedRows.length),
+              querySql: sql,
             } as any);
           } catch (err) {
+            webviewManager.postMessage(panelId, {
+              type: 'error',
+              data: { message: `Failed to fetch page data: ${err instanceof Error ? err.message : String(err)}` },
+            });
             vscode.window.showErrorMessage(`Failed to fetch page data: ${err}`);
           }
         }
@@ -1456,12 +1599,15 @@ export function activate(context: vscode.ExtensionContext) {
         if (driver) {
           try {
             await vscode.window.withProgress(
-              { location: vscode.ProgressLocation.Notification, title: `Copying ${tableName} as CSV...`, cancellable: false },
+              { location: vscode.ProgressLocation.Notification, title: `Copying ${tableName} as ${(message as any).data?.format === 'tsv' ? 'TSV' : 'CSV'}...`, cancellable: false },
               async () => {
                 const data = (message as any).data || {};
+                const format: 'csv' | 'tsv' = data.format === 'tsv' ? 'tsv' : 'csv';
                 const sortStates: { column: number; direction: 'asc' | 'desc' }[] = data.sortStates || [];
                 const whereFilter: string | undefined = data.whereFilter;
                 const includeHeader = data.includeHeader !== false;
+                const separator = format === 'tsv' ? '\t' : ',';
+                const escapeCell = format === 'tsv' ? tsvEscape : csvEscape;
                 const escapedTable = schemaName
                   ? `${driver.escapeIdentifier(schemaName)}.${driver.escapeIdentifier(tableName)}`
                   : driver.escapeIdentifier(tableName);
@@ -1480,13 +1626,13 @@ export function activate(context: vscode.ExtensionContext) {
                 }
 
                 const copyResult = serializeQueryResult(await driver.query(sql));
-                const header = result.columns.map(c => csvEscape(c.name)).join(',');
-                const body = copyResult.rows.map(row => row.map(csvEscape).join(',')).join('\n');
+                const header = result.columns.map(c => escapeCell(c.name)).join(separator);
+                const body = copyResult.rows.map(row => row.map(escapeCell).join(separator)).join('\n');
                 await vscode.env.clipboard.writeText(includeHeader ? `${header}\n${body}` : body);
                 webviewManager.postMessage(panelId, {
                   type: 'copyResult',
                   success: true,
-                  message: `Copied ${copyResult.rows.length.toLocaleString()} row${copyResult.rows.length === 1 ? '' : 's'} as CSV`,
+                  message: `Copied ${copyResult.rows.length.toLocaleString()} row${copyResult.rows.length === 1 ? '' : 's'} as ${format.toUpperCase()}`,
                 } as any);
               }
             );
@@ -1562,6 +1708,7 @@ export function activate(context: vscode.ExtensionContext) {
             schemaName,
             pageSize,
             hasMore,
+            querySql: refreshSql,
           } as any);
         } catch (err) {
           vscode.window.showErrorMessage(`Save failed: ${err instanceof Error ? err.message : err}`);
@@ -1602,6 +1749,10 @@ export function activate(context: vscode.ExtensionContext) {
         openQuickViewPanel(message.data.columns, message.data.rowData);
       }
     }, vscode.ViewColumn.Active);
+
+    if (panelExists) {
+      webviewManager.postMessage(panelId, messagePayload);
+    }
   }
 
   function openQuickViewPanel(columns: any[], rowData: any[]) {
@@ -1645,7 +1796,29 @@ export function activate(context: vscode.ExtensionContext) {
     return text;
   }
 
-  function generateCreateTableDDL(table: string, columns: any[], driver: any): string {
+  async function getTableDDL(driver: any, table: string, schema?: string): Promise<string> {
+    const escapedTable = schema
+      ? `${driver.escapeIdentifier(schema)}.${driver.escapeIdentifier(table)}`
+      : driver.escapeIdentifier(table);
+
+    if (driver.driverType === 'mysql') {
+      const result = await driver.query(`SHOW CREATE TABLE ${escapedTable}`);
+      return result.rows[0]?.[1] as string || '';
+    }
+    if (driver.driverType === 'postgresql') {
+      const columns = await driver.getColumns(table, schema);
+      return generateCreateTableDDL(table, columns, driver, schema);
+    }
+    if (driver.driverType === 'sqlite') {
+      const result = await driver.query(
+        `SELECT sql FROM sqlite_master WHERE type='table' AND name=${driver.escapeValue(table)}`
+      );
+      return result.rows[0]?.[0] as string || '';
+    }
+    return '';
+  }
+
+  function generateCreateTableDDL(table: string, columns: any[], driver: any, schema?: string): string {
     const lines = columns.map((col: any) => {
       let line = `  ${driver.escapeIdentifier(col.name)} ${col.type}`;
       if (!col.nullable) { line += ' NOT NULL'; }
@@ -1654,7 +1827,10 @@ export function activate(context: vscode.ExtensionContext) {
     });
     const pkCols = columns.filter((c: any) => c.isPrimaryKey).map((c: any) => driver.escapeIdentifier(c.name));
     if (pkCols.length > 0) { lines.push(`  PRIMARY KEY (${pkCols.join(', ')})`); }
-    return `CREATE TABLE ${driver.escapeIdentifier(table)} (\n${lines.join(',\n')}\n)`;
+    const escapedTable = schema
+      ? `${driver.escapeIdentifier(schema)}.${driver.escapeIdentifier(table)}`
+      : driver.escapeIdentifier(table);
+    return `CREATE TABLE ${escapedTable} (\n${lines.join(',\n')}\n)`;
   }
 
   // Register SQLite custom editor provider
@@ -1952,6 +2128,14 @@ export async function detectDatabaseConfigsInFile(filePath: string, workspaceNam
         }
         const parsed = parseDatabaseUrl(urlStr, env);
         if (parsed) {
+          if (parsed.type === DatabaseType.SQLite) {
+            const sqlitePath = parsed.filepath || parsed.database;
+            if (sqlitePath && !path.isAbsolute(sqlitePath)) {
+              const resolved = path.resolve(path.dirname(filePath), sqlitePath);
+              parsed.database = resolved;
+              parsed.filepath = resolved;
+            }
+          }
           if (!parsed.username && (env.DB_USERNAME || env.DB_USER || env.SPRING_DATASOURCE_USERNAME)) {
             parsed.username = env.DB_USERNAME || env.DB_USER || env.SPRING_DATASOURCE_USERNAME;
           }
@@ -2099,7 +2283,12 @@ async function scanWorkspaceForDatabaseConfigs() {
               filepath: config.filepath || '',
               ssl: { mode: SSLMode.Disabled },
               ssh: { enabled: false, host: '', port: 22, username: '', authMethod: 'password' },
-              options: {},
+              options: {
+                ...(config.options || {}),
+                tableproAutoImported: true,
+                tableproWorkspaceRoot: rootPath,
+                tableproSourceFile: filePath,
+              },
               group: `Imported (${workspaceName})`,
               tags: ['auto-imported', workspaceName],
               color: '',
@@ -2143,7 +2332,11 @@ async function scanWorkspaceForDatabaseConfigs() {
           filepath: resolvedPath,
           ssl: { mode: SSLMode.Disabled },
           ssh: { enabled: false, host: '', port: 22, username: '', authMethod: 'password' },
-          options: {},
+          options: {
+            tableproAutoImported: true,
+            tableproWorkspaceRoot: rootPath,
+            tableproSourceFile: resolvedPath,
+          },
           group: `Imported (${workspaceName})`,
           tags: ['auto-imported', workspaceName, 'sqlite-file'],
           color: '',
@@ -2162,9 +2355,10 @@ async function scanWorkspaceForDatabaseConfigs() {
   }
 
   if (importedCount > 0) {
-    vscode.window.showInformationMessage(`TablePro: Auto-imported ${importedCount} database connection(s) from .env files.`);
-    connectionTreeProvider.refresh();
+    vscode.window.showInformationMessage(`TablePro: Auto-imported ${importedCount} database connection(s) for this workspace.`);
   }
+
+  connectionTreeProvider.refresh();
 }
 
   function getQueryContextTitle(document: vscode.TextDocument): string | undefined {

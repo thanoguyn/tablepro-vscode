@@ -241,6 +241,7 @@ export type ExtensionMessage =
   | { type: 'quickViewData'; data: { columns: any[]; rowData: any[] } }
   | { type: 'rowSelected'; data: { columns: any[]; rowData: any[] } }
   | { type: 'pageData'; page: number; data: QueryResult; sortState?: any }
+  | { type: 'ddlData'; data: { ddl: string } }
   | { type: 'totalRowsCount'; data: { totalRows: number } };
 
 export type WebviewMessage =
@@ -257,7 +258,8 @@ export type WebviewMessage =
   | { type: 'openQuickView'; data: { columns: any[]; rowData: any[] } }
   | { type: 'rowSelected'; data: { columns: any[]; rowData: any[] } }
   | { type: 'countRows'; data?: { whereFilter?: string } }
-  | { type: 'copyTableData'; data: { format: 'csv'; includeHeader?: boolean; sortStates?: any[]; whereFilter?: string } }
+  | { type: 'getDDL' }
+  | { type: 'copyTableData'; data: { format: 'csv' | 'tsv'; includeHeader?: boolean; sortStates?: any[]; whereFilter?: string } }
   | { type: 'fetchPage'; data: { page: number; sortColumn?: string; sortDirection?: 'asc' | 'desc'; sortStates?: any[]; whereFilter?: string } };
 
 export interface SortConfig {

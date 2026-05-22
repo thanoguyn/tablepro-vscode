@@ -2,7 +2,7 @@
   "name": "tablepro-vscode",
   "displayName": "TablePro Vscode - Database Client",
   "description": "A fast, feature-rich database client for VSCode. Connect to MySQL, PostgreSQL, SQLite and more.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "thanoguyn",
   "icon": "media/logo.png",
   "license": "MIT",

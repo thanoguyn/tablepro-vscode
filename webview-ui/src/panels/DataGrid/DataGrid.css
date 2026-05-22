@@ -5,12 +5,18 @@
 
 /* Toolbar */
 .datagrid-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 5px 10px; gap: 6px; border-bottom: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.08)); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); flex-shrink: 0; flex-wrap: wrap; }
-.toolbar-left { display: flex; align-items: center; gap: 8px; flex: 1; flex-wrap: wrap; }
+.toolbar-left { display: flex; align-items: center; gap: 5px; flex: 1; flex-wrap: wrap; min-width: 0; }
 .toolbar-right { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
-.filter-input { width: 180px; padding: 3px 7px; font-size: 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.12)); border-radius: 3px; outline: none; }
+.row-filter-wrap { position: relative; flex: 0 1 270px; min-width: 210px; }
+.filter-input { width: 100%; box-sizing: border-box; padding: 4px 74px 4px 8px; font-size: 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.12)); border-radius: 4px; outline: none; }
 .filter-input:focus { border-color: var(--vscode-focusBorder); }
+.filter-mode-actions { position: absolute; top: 2px; right: 2px; bottom: 2px; display: flex; align-items: stretch; gap: 2px; }
+.filter-mode-btn { width: 32px; min-width: 32px; padding: 0; border: 1px solid transparent; border-radius: 3px; background: transparent; color: var(--vscode-descriptionForeground); cursor: pointer; font-size: 10px; line-height: 18px; font-weight: 700; }
+.filter-mode-btn:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
+.filter-mode-btn.active { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
 .row-count { font-size: 11px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
-.toolbar-btn { padding: 3px 7px; font-size: 11px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 1px solid transparent; border-radius: 3px; cursor: pointer; white-space: nowrap; }
+.toolbar-btn { padding: 3px 7px; font-size: 12px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 1px solid transparent; border-radius: 3px; cursor: pointer; white-space: nowrap; }
+.toolbar-btn.icon-btn { width: 30px; min-width: 30px; height: 28px; display: inline-flex; align-items: center; justify-content: center; padding: 0; font-size: 17px; line-height: 1; }
 .toolbar-btn:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
 .toolbar-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 .toolbar-btn.btn-active { border-color: var(--vscode-focusBorder); background: rgba(0,120,215,0.12); }
@@ -63,6 +69,9 @@
 /* Table */
 .datagrid-main { flex: 1; min-height: 0; display: flex; overflow: hidden; }
 .datagrid-table-wrapper { flex: 1; min-width: 0; overflow: auto; user-select: none; }
+.ddl-view { flex: 1; min-width: 0; overflow: auto; background: var(--vscode-editor-background); }
+.ddl-code-view { min-height: 100%; box-sizing: border-box; margin: 0; padding: 12px 14px; color: var(--vscode-editor-foreground); font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.5; white-space: pre; tab-size: 2; }
+.ddl-state { height: 100%; display: flex; align-items: center; justify-content: center; color: var(--vscode-descriptionForeground); font-size: 12px; }
 .datagrid-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--vscode-editor-font-family, 'SF Mono', monospace); table-layout: auto; user-select: none; }
 .datagrid-table thead { position: sticky; top: 0; z-index: 10; }
 .datagrid-table th { background: var(--vscode-editorGroupHeader-tabsBackground, #252526); color: var(--vscode-foreground); padding: 5px 8px; text-align: left; font-weight: 600; font-size: 11px; white-space: nowrap; border-bottom: 2px solid var(--vscode-widget-border, rgba(255,255,255,0.08)); user-select: none; }
@@ -75,6 +84,9 @@
 
 /* Cells */
 .datagrid-table td { padding: 3px 8px; border-bottom: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.04)); white-space: nowrap; max-width: 400px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.datagrid-table td.loading-row { height: 92px; text-align: center; color: var(--vscode-descriptionForeground); font-family: var(--vscode-font-family); font-size: 12px; background: var(--vscode-editor-background); }
+.loading-spinner { display: inline-block; width: 13px; height: 13px; margin-right: 8px; vertical-align: -2px; border: 2px solid var(--vscode-widget-border, rgba(255,255,255,0.18)); border-top-color: var(--vscode-progressBar-background, var(--vscode-focusBorder)); border-radius: 50%; animation: tablepro-spin 0.8s linear infinite; }
+@keyframes tablepro-spin { to { transform: rotate(360deg); } }
 .datagrid-table tr:hover td { background: var(--vscode-list-hoverBackground); }
 .datagrid-table tr.selected td { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
 .datagrid-table tr.multi-selected td { background: rgba(0,120,215,0.18) !important; }
@@ -198,7 +210,8 @@
 }
 .dqv-value {
   min-width: 0;
-  max-height: 92px;
+  width: 100%;
+  max-height: 260px;
   overflow: auto;
   padding: 5px 6px;
   border: 1px solid transparent;
@@ -212,6 +225,8 @@
   word-break: break-word;
   text-align: left;
   cursor: zoom-in;
+  display: block;
+  align-self: start;
 }
 .dqv-value:hover { border-color: var(--vscode-focusBorder); }
 .dqv-value.null {
@@ -327,11 +342,21 @@ tr:hover .row-actions, tr.selected .row-actions { opacity: 1; }
 .row-action-delete:hover { color: var(--vscode-errorForeground) !important; }
 
 /* Pagination */
-.datagrid-pagination { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 5px 12px; border-top: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.08)); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); flex-shrink: 0; }
-.page-btn { padding: 2px 8px; font-size: 12px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 3px; cursor: pointer; min-width: 28px; }
+.datagrid-pagination { display: grid; grid-template-columns: minmax(120px, 1fr) auto minmax(120px, 1fr); align-items: center; gap: 8px; padding: 5px 12px; border-top: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.08)); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); flex-shrink: 0; }
+.pagination-left { display: flex; align-items: center; justify-content: flex-start; min-width: 0; }
+.pagination-center { display: flex; align-items: center; justify-content: center; gap: 8px; }
+.pagination-right { min-width: 0; }
+.page-btn { padding: 2px 8px; font-size: 14px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 3px; cursor: pointer; min-width: 30px; min-height: 25px; }
 .page-btn:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
 .page-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 .page-info { font-size: 11px; color: var(--vscode-descriptionForeground); min-width: 80px; text-align: center; }
+.page-count-link { border: none; background: transparent; color: var(--vscode-textLink-foreground); cursor: pointer; padding: 0 1px; font: inherit; text-decoration: underline dotted; }
+.page-count-link:hover { color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground)); }
+.view-toggle { display: inline-flex; align-items: center; border: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.12)); border-radius: 4px; overflow: hidden; }
+.view-toggle-btn { min-width: 30px; height: 23px; border: none; border-right: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.12)); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); cursor: pointer; font-size: 11px; }
+.view-toggle-btn:last-child { border-right: none; }
+.view-toggle-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+.view-toggle-btn.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
 
 .datagrid-log-strip {
   display: flex;
@@ -355,6 +380,9 @@ tr:hover .row-actions, tr.selected .row-actions { opacity: 1; }
 .log-toggle { width: 12px; flex-shrink: 0; color: var(--vscode-descriptionForeground); }
 .log-time { flex-shrink: 0; color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family, monospace); }
 .log-message { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-query-separator { flex-shrink: 0; color: var(--vscode-descriptionForeground); }
+.log-query-inline { min-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-textLink-foreground); font-family: var(--vscode-editor-font-family, monospace); cursor: pointer; }
+.log-query-inline:hover { text-decoration: underline; color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground)); }
 .datagrid-log-drawer {
   height: 190px;
   flex-shrink: 0;
@@ -420,6 +448,35 @@ tr:hover .row-actions, tr.selected .row-actions { opacity: 1; }
   word-break: break-word;
   font-family: var(--vscode-editor-font-family, monospace);
   color: var(--vscode-editor-foreground);
+}
+.log-detail-query {
+  display: block;
+  width: calc(100% - 20px);
+  margin: 0 10px 10px;
+  padding: 7px 9px;
+  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.12));
+  border-radius: 4px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-textLink-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  cursor: pointer;
+}
+.log-detail-query:hover { background: var(--vscode-list-hoverBackground); }
+.query-modal {
+  width: min(980px, 94vw);
+  height: min(520px, 72vh);
+  display: flex;
+  flex-direction: column;
+  background: var(--vscode-editor-background);
+  color: var(--vscode-editor-foreground);
+  border: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.16));
+  border-radius: 6px;
+  box-shadow: 0 12px 44px rgba(0,0,0,0.48);
 }
 .log-empty { padding: 10px; color: var(--vscode-descriptionForeground); font-style: italic; }
 .datagrid-toast {

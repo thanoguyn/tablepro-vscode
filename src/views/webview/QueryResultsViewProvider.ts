@@ -5,6 +5,7 @@ export class QueryResultsViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'tablepro.queryResultsView';
   private _view?: vscode.WebviewView;
   private _lastResult?: QueryResult;
+  private _lastQueryMessage?: ExtensionMessage;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -31,8 +32,8 @@ export class QueryResultsViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(
       (message: WebviewMessage) => {
         if (message.type === 'ready') {
-          if (this._lastResult) {
-            webviewView.webview.postMessage({ type: 'queryResult', data: this._lastResult });
+          if (this._lastQueryMessage) {
+            webviewView.webview.postMessage(this._lastQueryMessage);
           }
         }
         this.onMessageCallback(message);
@@ -48,6 +49,7 @@ export class QueryResultsViewProvider implements vscode.WebviewViewProvider {
   public postMessage(message: ExtensionMessage) {
     if (message.type === 'queryResult') {
       this._lastResult = message.data;
+      this._lastQueryMessage = message;
     }
     if (this._view) {
       this._view.show(true); // reveal/focus the panel view

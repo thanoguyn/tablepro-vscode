@@ -33,13 +33,11 @@ class ConnectionItem extends vscode.TreeItem {
     this.iconPath = this.getIcon(config.type, connected);
     this.contextValue = connected ? 'connection-connected' : 'connection-disconnected';
 
-    this.command = connected
-      ? undefined
-      : {
-          command: 'tablepro.connect',
-          title: 'Connect',
-          arguments: [config.id],
-        };
+    this.command = {
+      command: connected ? 'tablepro.selectConnection' : 'tablepro.connect',
+      title: connected ? 'Select Connection' : 'Connect',
+      arguments: [config.id],
+    };
   }
 
   private buildTooltip(config: ConnectionConfig, connected: boolean, typeLabel: string): vscode.MarkdownString {

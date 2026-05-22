@@ -129,6 +129,7 @@ export class ConnectionManager {
       await driver.connect(connectConfig);
 
       this.connections.set(id, { config, driver, tunnel });
+      await this.ensureInitialDatabase(id);
       this.setActiveConnection(id);
       this._onConnectionChanged.fire();
       Logger.getInstance().logInfo(`Successfully connected to database: ${config.name || config.host}`);
@@ -221,11 +222,40 @@ export class ConnectionManager {
     return this.connections.get(connectionId);
   }
 
+  /** Select an already-connected connection as active without reconnecting. */
+  async selectConnection(id: string): Promise<void> {
+    if (!this.isConnected(id)) {
+      throw new Error('Connection is not active. Connect first.');
+    }
+    await this.ensureInitialDatabase(id);
+    this.setActiveConnection(id);
+  }
+
   /** Set the active connection (for the sidebar, query context, etc.) */
   setActiveConnection(id: string | undefined): void {
     this._activeConnectionId = id;
     vscode.commands.executeCommand('setContext', 'tablepro.hasActiveConnection', !!id);
     this._onActiveConnectionChanged.fire(id);
+  }
+
+  private async ensureInitialDatabase(id: string): Promise<void> {
+    const conn = this.connections.get(id);
+    if (!conn || !conn.driver.isConnected || conn.config.type === DatabaseType.SQLite) {
+      return;
+    }
+
+    try {
+      const currentDb = await conn.driver.getCurrentDatabase();
+      if (currentDb) { return; }
+
+      const databases = await conn.driver.getDatabases();
+      const firstDb = databases[0]?.name;
+      if (firstDb) {
+        await conn.driver.switchDatabase(firstDb);
+      }
+    } catch (err) {
+      Logger.getInstance().logError(`Failed to select initial database for ${conn.config.name}: ${err instanceof Error ? err.message : String(err)}`, err);
+    }
   }
 
   /** Dispose all connections and tunnels */
