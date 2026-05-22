@@ -5,3 +5,4 @@ dist/
 .vscode-test/
 webview-ui/node_modules/
 *.sqlite
+!Chinook.sqlite
