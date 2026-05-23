@@ -2,7 +2,7 @@
 
 TablePro is a VS Code extension for browsing databases, running SQL, viewing table data, and working with local SQLite files directly inside the editor.
 
-It is currently an early release (`0.1.7`) focused on MySQL, PostgreSQL, and SQLite workflows.
+It is currently an early release (`0.1.8`) focused on MySQL, PostgreSQL, and SQLite workflows.
 
 ## Features
 
@@ -22,8 +22,14 @@ It is currently an early release (`0.1.7`) focused on MySQL, PostgreSQL, and SQL
 - View recent grid activity in the embedded bottom log panel.
 - Preview and save table edits.
 - Generate table structure and DDL views.
+- Create tables visually, including columns, indexes, foreign keys, and MySQL/MariaDB charset options.
+- Edit table structure with generated SQL batches for column changes, indexes, foreign keys, rename operations, and MySQL/MariaDB charset changes.
+- Create databases and edit MySQL/MariaDB database charset/collation from the database tree.
+- Dump and import whole databases from the database tree.
 - Export and import table data.
 - Open ER diagrams and query execution plans.
+- Search saved connections from the command palette.
+- Store project-level database connections in `.tablepro.json`.
 - Use SSH tunneling for supported connection types.
 - Auto-detect database configuration from project `.env` files and SQLite files.
 
@@ -91,6 +97,36 @@ Open or create a `.sql` file, then use:
 - **New Query** to create a new SQL document using the active connection.
 
 Query documents keep their selected TablePro connection context in VS Code workspace state.
+
+## Schema Editing
+
+TablePro can generate SQL for common schema changes from visual forms:
+
+- **Create New Table** from the Schema view title action.
+- **Edit Table Structure** from a table context menu.
+- Add, edit, or drop columns, indexes, and foreign keys.
+- Leave a new foreign key name blank to auto-generate one from the local table, local columns, referenced table, and referenced columns.
+- Accumulate generated SQL from multiple tabs into one preview, then execute the batch once.
+- Set MySQL/MariaDB table charset and collation when creating or editing a table.
+
+Generated SQL remains editable before execution. MySQL/MariaDB column nullability/type edits use `MODIFY COLUMN` because MySQL requires the column definition for those operations.
+
+## Database Operations
+
+The Database view provides database-level actions:
+
+- **Create Database** for MySQL/MariaDB, PostgreSQL, and SQLite files.
+- **Edit Database** for MySQL/MariaDB charset and collation.
+- **Dump Database** to SQL.
+- **Import Database** from a SQL file.
+
+MySQL/MariaDB and PostgreSQL dumps use native tools (`mysqldump` / `pg_dump`) when available. If a native dump tool is missing or incompatible, TablePro falls back to dumping through the active driver connection where possible.
+
+## Project Connections
+
+TablePro can read and write workspace-level connection config in `.tablepro.json`. Project connections are shown alongside global saved connections and are marked as project connections in the sidebar.
+
+Passwords are not written into `.tablepro.json`; secrets are stored through VS Code SecretStorage or requested when needed.
 
 ## Data Grid
 

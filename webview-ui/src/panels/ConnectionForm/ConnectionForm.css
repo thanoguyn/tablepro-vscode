@@ -3,8 +3,9 @@
 .connection-form {
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  overflow: hidden;
+  min-height: 100vh;
+  height: auto;
+  overflow: auto;
 }
 
 /* ── Header ── */
@@ -67,7 +68,7 @@
 
 .form-content {
   flex: 1;
-  overflow-y: auto;
+  overflow: visible;
   padding: 24px;
 }
 

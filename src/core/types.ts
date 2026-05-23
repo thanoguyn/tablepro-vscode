@@ -242,7 +242,9 @@ export type ExtensionMessage =
   | { type: 'rowSelected'; data: { columns: any[]; rowData: any[] } }
   | { type: 'pageData'; page: number; data: QueryResult; sortState?: any }
   | { type: 'ddlData'; data: { ddl: string } }
-  | { type: 'totalRowsCount'; data: { totalRows: number } };
+  | { type: 'totalRowsCount'; data: { totalRows: number } }
+  | { type: 'driverType'; data: { type: string } }
+  | { type: 'tableList'; data: { tables: TableInfo[] } };
 
 export type WebviewMessage =
   | { type: 'executeQuery'; data: { sql: string; connectionId: string } }
@@ -251,7 +253,7 @@ export type WebviewMessage =
   | { type: 'deleteConnection'; data: { id: string } }
   | { type: 'fetchTableData'; data: { connectionId: string; table: string; page: number; pageSize: number; sort?: SortConfig; filters?: FilterConfig[] } }
   | { type: 'saveChanges'; data: { rows: any[] } }
-  | { type: 'executeDDL'; data: { sql: string } }
+  | { type: 'executeDDL'; data: { sql: string; renameTo?: string | null } }
   | { type: 'previewSQL'; data: { rows: any[] } }
   | { type: 'getConnections' }
   | { type: 'ready' }
@@ -260,7 +262,10 @@ export type WebviewMessage =
   | { type: 'countRows'; data?: { whereFilter?: string } }
   | { type: 'getDDL' }
   | { type: 'copyTableData'; data: { format: 'csv' | 'tsv'; includeHeader?: boolean; sortStates?: any[]; whereFilter?: string } }
-  | { type: 'fetchPage'; data: { page: number; sortColumn?: string; sortDirection?: 'asc' | 'desc'; sortStates?: any[]; whereFilter?: string } };
+  | { type: 'fetchPage'; data: { page: number; sortColumn?: string; sortDirection?: 'asc' | 'desc'; sortStates?: any[]; whereFilter?: string } }
+  | { type: 'getDriverType' }
+  | { type: 'getTableList'; data?: { schemaName?: string } }
+  | { type: 'executeCreateTable'; data: { sql: string; tableName: string; schemaName?: string } };
 
 export interface SortConfig {
   column: string;

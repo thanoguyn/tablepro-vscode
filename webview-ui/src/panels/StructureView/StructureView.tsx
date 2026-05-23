@@ -2,6 +2,54 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { postMessage, onMessage } from '../../hooks/useVsCode';
 import './StructureView.css';
 
+interface DataTypeAutocompleteProps {
+  value: string;
+  onChange: (val: string) => void;
+  driverType: string;
+}
+
+const COMMON_TYPES: Record<string, string[]> = {
+  mysql: [
+    'INT', 'BIGINT', 'VARCHAR(255)', 'TEXT', 'TINYINT', 'SMALLINT', 'MEDIUMINT', 'DECIMAL(10,2)', 'FLOAT', 'DOUBLE',
+    'DATE', 'TIME', 'DATETIME', 'TIMESTAMP', 'JSON', 'BLOB', 'CHAR(36)', 'BINARY', 'VARBINARY'
+  ],
+  postgresql: [
+    'integer', 'bigint', 'character varying(255)', 'text', 'boolean', 'smallint', 'numeric(10,2)', 'real', 'double precision',
+    'date', 'time without time zone', 'timestamp without time zone', 'jsonb', 'bytea', 'uuid', 'json', 'interval'
+  ],
+  sqlite: [
+    'INTEGER', 'TEXT', 'REAL', 'NUMERIC', 'BLOB', 'INT', 'VARCHAR(255)', 'DATETIME', 'BOOLEAN'
+  ]
+};
+
+function DataTypeAutocomplete({ value, onChange, driverType }: DataTypeAutocompleteProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const types = COMMON_TYPES[driverType] || COMMON_TYPES.mysql;
+  const filteredTypes = types.filter(t => t.toLowerCase().includes(value.toLowerCase()));
+
+  return (
+    <div className="autocomplete-container">
+      <input
+        type="text"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        onFocus={() => setIsOpen(true)}
+        onBlur={() => setTimeout(() => setIsOpen(false), 200)}
+        placeholder="e.g. VARCHAR(255)"
+      />
+      {isOpen && filteredTypes.length > 0 && (
+        <ul className="autocomplete-suggestions">
+          {filteredTypes.map(t => (
+            <li key={t} onMouseDown={() => onChange(t)}>
+              {t}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 interface ColumnInfo {
   name: string;
   type: string;
@@ -31,6 +79,12 @@ interface ForeignKeyInfo {
   onUpdate: string;
 }
 
+interface TableInfo {
+  name: string;
+  schema?: string;
+  type: string;
+}
+
 interface StructureData {
   tableName: string;
   schemaName?: string;
@@ -40,7 +94,18 @@ interface StructureData {
   ddl: string;
 }
 
-type TabType = 'columns' | 'indexes' | 'foreignKeys' | 'ddl';
+type TabType = 'columns' | 'indexes' | 'foreignKeys' | 'options' | 'ddl';
+
+const MYSQL_CHARSETS = [
+  { label: 'DEFAULT', collations: [] },
+  { label: 'utf8mb4', collations: ['utf8mb4_0900_ai_ci', 'utf8mb4_unicode_ci', 'utf8mb4_general_ci'] },
+  { label: 'utf8', collations: ['utf8_general_ci', 'utf8_unicode_ci'] },
+  { label: 'latin1', collations: ['latin1_swedish_ci', 'latin1_general_ci'] },
+];
+
+function sanitizeIdentifierPart(value: string): string {
+  return value.trim().replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase();
+}
 
 export default function StructureView() {
   const [data, setData] = useState<StructureData | null>(null);
@@ -60,8 +125,26 @@ export default function StructureView() {
   const [newIdxUnique, setNewIdxUnique] = useState(false);
   const [newIdxType, setNewIdxType] = useState('BTREE');
 
+  const [tables, setTables] = useState<TableInfo[]>([]);
+  const [editingFk, setEditingFk] = useState<number | null>(null);
+  const [fkName, setFkName] = useState('');
+  const [fkColumns, setFkColumns] = useState<string[]>([]);
+  const [fkRefTable, setFkRefTable] = useState('');
+  const [fkRefColumns, setFkRefColumns] = useState('');
+  const [fkOnUpdate, setFkOnUpdate] = useState('NO ACTION');
+  const [fkOnDelete, setFkOnDelete] = useState('NO ACTION');
+
+  const [driverType, setDriverType] = useState<string>('mysql');
+  const [renaming, setRenaming] = useState(false);
+  const [newTableName, setNewTableName] = useState('');
+  const [renameTo, setRenameTo] = useState<string | null>(null);
+  const [tableCharset, setTableCharset] = useState('DEFAULT');
+  const [tableCollation, setTableCollation] = useState('');
+
   useEffect(() => {
     postMessage({ type: 'ready' });
+    postMessage({ type: 'getDriverType' });
+    postMessage({ type: 'getTableList' });
     const unsub = onMessage((msg: any) => {
       if (msg.type === 'structureData') {
         setData(msg.data);
@@ -69,6 +152,10 @@ export default function StructureView() {
         setEditingColumn(null);
       } else if (msg.type === 'reloadStructure') {
         postMessage({ type: 'ready' });
+      } else if (msg.type === 'driverType') {
+        setDriverType(msg.data.type);
+      } else if (msg.type === 'tableList') {
+        setTables(msg.data.tables || []);
       }
     });
     return unsub;
@@ -76,11 +163,29 @@ export default function StructureView() {
 
   const handleApplySQL = useCallback(() => {
     if (!generatedSQL.trim()) return;
-    postMessage({ type: 'executeDDL', data: { sql: generatedSQL } });
-  }, [generatedSQL]);
+    postMessage({ type: 'executeDDL', data: { sql: generatedSQL, renameTo } });
+    setRenameTo(null);
+  }, [generatedSQL, renameTo]);
+
+  const appendGeneratedSQL = useCallback((sql: string) => {
+    const next = sql.trim();
+    if (!next) return;
+    setGeneratedSQL(prev => {
+      const current = prev.trim();
+      if (!current || current.startsWith('-- Edit column details')) {
+        return next;
+      }
+      return `${current}\n\n${next}`;
+    });
+  }, []);
 
   // Helper to escape identifiers
-  const escapeId = (name: string) => `"${name.replace(/"/g, '""')}"`;
+  const escapeId = (name: string) => {
+    if (driverType === 'mysql') {
+      return `\`${name.replace(/`/g, '``')}\``;
+    }
+    return `"${name.replace(/"/g, '""')}"`;
+  };
 
   const getEscapedTable = () => {
     if (!data) return '';
@@ -91,8 +196,6 @@ export default function StructureView() {
   const handleAddColumn = () => {
     if (!data) return;
     const name = `new_column_${data.columns.length + 1}`;
-    const sql = `ALTER TABLE ${getEscapedTable()} ADD COLUMN ${escapeId(name)} VARCHAR(255) NULL;`;
-    setGeneratedSQL(sql);
     setEditingColumn(-1);
     setColName(name);
     setColType('VARCHAR(255)');
@@ -108,37 +211,70 @@ export default function StructureView() {
     setColType(col.type);
     setColNullable(col.nullable);
     setColDefault(col.defaultValue === null || col.defaultValue === undefined ? '' : String(col.defaultValue));
-    setGeneratedSQL('-- Edit column details below and click "Generate"');
   };
 
   const generateColumnAlter = () => {
     if (!data || editingColumn === null) return;
     const isNew = editingColumn === -1;
-    let sql = '';
+    const statements: string[] = [];
     
     if (isNew) {
-      sql = `ALTER TABLE ${getEscapedTable()} ADD COLUMN ${escapeId(colName)} ${colType}${colNullable ? ' NULL' : ' NOT NULL'}${colDefault ? ` DEFAULT ${colDefault}` : ''};`;
+      statements.push(`ALTER TABLE ${getEscapedTable()} ADD COLUMN ${escapeId(colName)} ${colType}${colNullable ? ' NULL' : ' NOT NULL'}${colDefault ? ` DEFAULT ${colDefault}` : ''};`);
     } else {
       const origCol = data.columns[editingColumn];
-      // Note: ALTER COLUMN syntax varies. We generate standard SQL that users can customize in the text box.
-      sql = `-- Update column ${origCol.name}\n`;
-      if (origCol.name !== colName) {
-        sql += `ALTER TABLE ${getEscapedTable()} RENAME COLUMN ${escapeId(origCol.name)} TO ${escapeId(colName)};\n`;
+      const effectiveName = colName || origCol.name;
+      const origDefault = origCol.defaultValue === null || origCol.defaultValue === undefined ? '' : String(origCol.defaultValue);
+      const nameChanged = origCol.name !== effectiveName;
+      const typeChanged = origCol.type !== colType;
+      const nullabilityChanged = origCol.nullable !== colNullable;
+      const defaultChanged = origDefault !== colDefault;
+
+      if (nameChanged) {
+        if (driverType === 'mysql') {
+          const columnDefinition = `${escapeId(effectiveName)} ${colType}${colNullable ? ' NULL' : ' NOT NULL'}${colDefault ? ` DEFAULT ${colDefault}` : ''}`;
+          statements.push(`ALTER TABLE ${getEscapedTable()} CHANGE COLUMN ${escapeId(origCol.name)} ${columnDefinition};`);
+        } else {
+          statements.push(`ALTER TABLE ${getEscapedTable()} RENAME COLUMN ${escapeId(origCol.name)} TO ${escapeId(effectiveName)};`);
+        }
       }
-      sql += `ALTER TABLE ${getEscapedTable()} ALTER COLUMN ${escapeId(colName)} TYPE ${colType};\n`;
-      sql += `ALTER TABLE ${getEscapedTable()} ALTER COLUMN ${escapeId(colName)} ${colNullable ? 'DROP NOT NULL' : 'SET NOT NULL'};\n`;
-      if (colDefault) {
-        sql += `ALTER TABLE ${getEscapedTable()} ALTER COLUMN ${escapeId(colName)} SET DEFAULT ${colDefault};\n`;
+
+      if (driverType === 'mysql') {
+        if (!nameChanged && (typeChanged || nullabilityChanged)) {
+          const defaultSql = colDefault ? ` DEFAULT ${colDefault}` : (origDefault ? ` DEFAULT ${origDefault}` : '');
+          statements.push(`ALTER TABLE ${getEscapedTable()} MODIFY COLUMN ${escapeId(effectiveName)} ${colType}${colNullable ? ' NULL' : ' NOT NULL'}${defaultSql};`);
+        }
+        if (!nameChanged && !typeChanged && !nullabilityChanged && defaultChanged) {
+          statements.push(colDefault
+            ? `ALTER TABLE ${getEscapedTable()} ALTER COLUMN ${escapeId(effectiveName)} SET DEFAULT ${colDefault};`
+            : `ALTER TABLE ${getEscapedTable()} ALTER COLUMN ${escapeId(effectiveName)} DROP DEFAULT;`
+          );
+        }
+      } else if (driverType === 'sqlite') {
+        if (typeChanged || nullabilityChanged || defaultChanged) {
+          statements.push(`-- SQLite cannot directly alter column definition for ${escapeId(effectiveName)}. Rebuild the table to apply type/null/default changes.`);
+        }
       } else {
-        sql += `ALTER TABLE ${getEscapedTable()} ALTER COLUMN ${escapeId(colName)} DROP DEFAULT;\n`;
+        if (typeChanged) {
+          statements.push(`ALTER TABLE ${getEscapedTable()} ALTER COLUMN ${escapeId(effectiveName)} TYPE ${colType};`);
+        }
+        if (nullabilityChanged) {
+          statements.push(`ALTER TABLE ${getEscapedTable()} ALTER COLUMN ${escapeId(effectiveName)} ${colNullable ? 'DROP NOT NULL' : 'SET NOT NULL'};`);
+        }
+        if (defaultChanged) {
+          statements.push(colDefault
+            ? `ALTER TABLE ${getEscapedTable()} ALTER COLUMN ${escapeId(effectiveName)} SET DEFAULT ${colDefault};`
+            : `ALTER TABLE ${getEscapedTable()} ALTER COLUMN ${escapeId(effectiveName)} DROP DEFAULT;`
+          );
+        }
       }
     }
-    setGeneratedSQL(sql);
+
+    appendGeneratedSQL(statements.join('\n'));
   };
 
   const handleDropColumn = (name: string) => {
     const sql = `ALTER TABLE ${getEscapedTable()} DROP COLUMN ${escapeId(name)};`;
-    setGeneratedSQL(sql);
+    appendGeneratedSQL(sql);
   };
 
   // Index Actions
@@ -146,13 +282,81 @@ export default function StructureView() {
     if (!data || !newIdxName || newIdxCols.length === 0) return;
     const typePart = newIdxType && newIdxType !== 'BTREE' ? ` USING ${newIdxType}` : '';
     const sql = `CREATE ${newIdxUnique ? 'UNIQUE ' : ''}INDEX ${escapeId(newIdxName)} ON ${getEscapedTable()}${typePart} (${newIdxCols.map(escapeId).join(', ')});`;
-    setGeneratedSQL(sql);
+    appendGeneratedSQL(sql);
   };
 
   const handleDropIndex = (idxName: string) => {
     // Standard SQL (supports PostgreSQL/SQLite). MySQL uses: DROP INDEX name ON table
-    const sql = `DROP INDEX ${escapeId(idxName)};`;
-    setGeneratedSQL(sql);
+    const sql = driverType === 'mysql'
+      ? `DROP INDEX ${escapeId(idxName)} ON ${getEscapedTable()};`
+      : `DROP INDEX ${escapeId(idxName)};`;
+    appendGeneratedSQL(sql);
+  };
+
+  const resetFkForm = () => {
+    setEditingFk(null);
+    setFkName('');
+    setFkColumns([]);
+    setFkRefTable('');
+    setFkRefColumns('');
+    setFkOnUpdate('NO ACTION');
+    setFkOnDelete('NO ACTION');
+  };
+
+  const handleAddFk = () => {
+    resetFkForm();
+    setEditingFk(-1);
+  };
+
+  const handleEditFk = (idx: number) => {
+    const fk = data?.foreignKeys[idx];
+    if (!fk) return;
+    setEditingFk(idx);
+    setFkName(fk.name);
+    setFkColumns(fk.columns);
+    setFkRefTable(fk.referencedSchema ? `${fk.referencedSchema}.${fk.referencedTable}` : fk.referencedTable);
+    setFkRefColumns(fk.referencedColumns.join(', '));
+    setFkOnUpdate(fk.onUpdate || 'NO ACTION');
+    setFkOnDelete(fk.onDelete || 'NO ACTION');
+  };
+
+  const generateDropFkSQL = (fk: ForeignKeyInfo) => {
+    if (driverType === 'mysql') {
+      return `ALTER TABLE ${getEscapedTable()} DROP FOREIGN KEY ${escapeId(fk.name)};`;
+    }
+    return `ALTER TABLE ${getEscapedTable()} DROP CONSTRAINT ${escapeId(fk.name)};`;
+  };
+
+  const generateForeignKeyName = () => {
+    if (!data) return 'fk_table_col_ref_id';
+    const localTable = sanitizeIdentifierPart(data.tableName || 'table') || 'table';
+    const localCols = fkColumns.map(sanitizeIdentifierPart).filter(Boolean).join('_') || 'col';
+    const refTable = sanitizeIdentifierPart(fkRefTable.split('.').pop() || 'ref') || 'ref';
+    const refCols = fkRefColumns.split(',').map(sanitizeIdentifierPart).filter(Boolean).join('_') || 'id';
+    return `fk_${localTable}_${localCols}_${refTable}_${refCols}`.slice(0, 64);
+  };
+
+  const generateFkAlter = () => {
+    if (!data || editingFk === null || fkColumns.length === 0 || !fkRefTable || !fkRefColumns.trim()) return;
+    const constraintName = fkName.trim() || generateForeignKeyName();
+    const refParts = fkRefTable.split('.').map(part => part.trim()).filter(Boolean);
+    const refIdentifier = refParts.length === 2
+      ? `${escapeId(refParts[0])}.${escapeId(refParts[1])}`
+      : escapeId(refParts[0] || fkRefTable);
+    const refCols = fkRefColumns.split(',').map(col => col.trim()).filter(Boolean);
+    const addSql = `ALTER TABLE ${getEscapedTable()} ADD CONSTRAINT ${escapeId(constraintName)} FOREIGN KEY (${fkColumns.map(escapeId).join(', ')}) REFERENCES ${refIdentifier} (${refCols.map(escapeId).join(', ')}) ON UPDATE ${fkOnUpdate} ON DELETE ${fkOnDelete};`;
+
+    if (editingFk >= 0 && data.foreignKeys[editingFk]) {
+      appendGeneratedSQL(`${generateDropFkSQL(data.foreignKeys[editingFk])}\n${addSql}`);
+    } else {
+      appendGeneratedSQL(addSql);
+    }
+  };
+
+  const generateCharsetAlter = () => {
+    if (!data || driverType !== 'mysql' || tableCharset === 'DEFAULT') return;
+    const collationSql = tableCollation ? ` COLLATE ${tableCollation}` : '';
+    appendGeneratedSQL(`ALTER TABLE ${getEscapedTable()} DEFAULT CHARACTER SET ${tableCharset}${collationSql};`);
   };
 
   if (!data) {
@@ -177,6 +381,7 @@ export default function StructureView() {
             </span>
           </div>
         </div>
+        <button className="btn-secondary rename-btn" onClick={() => { setNewTableName(data.tableName); setRenaming(true); }}>✏️ Rename Table</button>
       </header>
 
       {/* Tabs */}
@@ -184,6 +389,7 @@ export default function StructureView() {
         <button className={activeTab === 'columns' ? 'active' : ''} onClick={() => setActiveTab('columns')}>Columns ({data.columns.length})</button>
         <button className={activeTab === 'indexes' ? 'active' : ''} onClick={() => setActiveTab('indexes')}>Indexes ({data.indexes.length})</button>
         <button className={activeTab === 'foreignKeys' ? 'active' : ''} onClick={() => setActiveTab('foreignKeys')}>Foreign Keys ({data.foreignKeys.length})</button>
+        <button className={activeTab === 'options' ? 'active' : ''} onClick={() => setActiveTab('options')}>Options</button>
         <button className={activeTab === 'ddl' ? 'active' : ''} onClick={() => setActiveTab('ddl')}>DDL</button>
       </nav>
 
@@ -303,6 +509,7 @@ export default function StructureView() {
                     <th>Referenced Columns</th>
                     <th>On Update</th>
                     <th>On Delete</th>
+                    <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -314,16 +521,59 @@ export default function StructureView() {
                       <td>{fk.referencedColumns.join(', ')}</td>
                       <td><span className="type-badge">{fk.onUpdate}</span></td>
                       <td><span className="type-badge">{fk.onDelete}</span></td>
+                      <td>
+                        <button className="btn-icon" onClick={() => handleEditFk(idx)} title="Edit foreign key">✏️</button>
+                        <button className="btn-icon btn-danger" onClick={() => appendGeneratedSQL(generateDropFkSQL(fk))} title="Drop foreign key">✕</button>
+                      </td>
                     </tr>
                   ))}
                   {data.foreignKeys.length === 0 && (
                     <tr>
-                      <td colSpan={6} style={{ textAlign: 'center', opacity: 0.5, padding: 20 }}>No foreign keys defined.</td>
+                      <td colSpan={7} style={{ textAlign: 'center', opacity: 0.5, padding: 20 }}>No foreign keys defined.</td>
                     </tr>
                   )}
                 </tbody>
               </table>
             </div>
+            <button className="btn-primary add-col-btn" onClick={handleAddFk}>＋ Add Foreign Key</button>
+          </div>
+        )}
+
+        {activeTab === 'options' && (
+          <div className="options-tab">
+            {driverType === 'mysql' ? (
+              <div className="visual-form">
+                <h3>Table Charset</h3>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label>Character Set</label>
+                    <select value={tableCharset} onChange={e => {
+                      setTableCharset(e.target.value);
+                      setTableCollation('');
+                    }}>
+                      {MYSQL_CHARSETS.map(charset => (
+                        <option key={charset.label} value={charset.label}>{charset.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label>Collation</label>
+                    <select value={tableCollation} onChange={e => setTableCollation(e.target.value)} disabled={tableCharset === 'DEFAULT'}>
+                      <option value="">DEFAULT</option>
+                      {(MYSQL_CHARSETS.find(charset => charset.label === tableCharset)?.collations || []).map(collation => (
+                        <option key={collation} value={collation}>{collation}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <button className="btn-primary" onClick={generateCharsetAlter} disabled={tableCharset === 'DEFAULT'}>Generate Charset SQL</button>
+              </div>
+            ) : (
+              <div className="visual-form">
+                <h3>Table Options</h3>
+                <p className="description">Changing table charset is only supported for MySQL/MariaDB tables.</p>
+              </div>
+            )}
           </div>
         )}
 
@@ -351,7 +601,7 @@ export default function StructureView() {
             </div>
             <div className="form-group">
               <label>Data Type</label>
-              <input type="text" value={colType} onChange={e => setColType(e.target.value)} />
+              <DataTypeAutocomplete value={colType} onChange={setColType} driverType={driverType} />
             </div>
             <div className="form-group-row">
               <label className="checkbox-label">
@@ -371,6 +621,71 @@ export default function StructureView() {
         </div>
       )}
 
+      {/* Foreign Key Editor */}
+      {editingFk !== null && (
+        <div className="alter-overlay">
+          <div className="alter-modal">
+            <h3>{editingFk === -1 ? 'Add Foreign Key' : 'Edit Foreign Key'}</h3>
+            <div className="form-group">
+              <label>Constraint Name</label>
+              <input type="text" value={fkName} onChange={e => setFkName(e.target.value)} placeholder="Leave blank to auto-generate" />
+            </div>
+            <div className="form-columns-list">
+              <h4>Local Columns:</h4>
+              {data.columns.map(c => (
+                <label key={c.name} className="checkbox-label">
+                  <input type="checkbox" checked={fkColumns.includes(c.name)}
+                    onChange={e => {
+                      if (e.target.checked) setFkColumns(prev => [...prev, c.name]);
+                      else setFkColumns(prev => prev.filter(x => x !== c.name));
+                    }} />
+                  {c.name}
+                </label>
+              ))}
+            </div>
+            <div className="form-group">
+              <label>Referenced Table</label>
+              <input list="structure-reference-tables" type="text" value={fkRefTable} onChange={e => setFkRefTable(e.target.value)} placeholder="schema.table or table" />
+              <datalist id="structure-reference-tables">
+                {tables.filter(t => t.type === 'table').map(t => (
+                  <option key={`${t.schema || ''}.${t.name}`} value={t.schema ? `${t.schema}.${t.name}` : t.name} />
+                ))}
+              </datalist>
+            </div>
+            <div className="form-group">
+              <label>Referenced Columns</label>
+              <input type="text" value={fkRefColumns} onChange={e => setFkRefColumns(e.target.value)} placeholder="id, other_id" />
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label>On Update</label>
+                <select value={fkOnUpdate} onChange={e => setFkOnUpdate(e.target.value)}>
+                  <option value="NO ACTION">NO ACTION</option>
+                  <option value="CASCADE">CASCADE</option>
+                  <option value="RESTRICT">RESTRICT</option>
+                  <option value="SET NULL">SET NULL</option>
+                  <option value="SET DEFAULT">SET DEFAULT</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label>On Delete</label>
+                <select value={fkOnDelete} onChange={e => setFkOnDelete(e.target.value)}>
+                  <option value="NO ACTION">NO ACTION</option>
+                  <option value="CASCADE">CASCADE</option>
+                  <option value="RESTRICT">RESTRICT</option>
+                  <option value="SET NULL">SET NULL</option>
+                  <option value="SET DEFAULT">SET DEFAULT</option>
+                </select>
+              </div>
+            </div>
+            <div className="actions">
+              <button className="btn-secondary" onClick={resetFkForm}>Cancel</button>
+              <button className="btn-primary" onClick={generateFkAlter} disabled={fkColumns.length === 0 || !fkRefTable || !fkRefColumns.trim()}>Generate Foreign Key SQL</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Generated SQL preview and executor */}
       {generatedSQL && (
         <div className="sql-preview-panel">
@@ -383,6 +698,30 @@ export default function StructureView() {
           <div className="preview-actions">
             <button className="btn-secondary" onClick={() => setGeneratedSQL('')}>Discard</button>
             <button className="btn-primary btn-save" onClick={handleApplySQL}>🚀 Execute ALTER SQL</button>
+          </div>
+        </div>
+      )}
+
+      {/* Rename Table Modal */}
+      {renaming && (
+        <div className="alter-overlay">
+          <div className="alter-modal">
+            <h3>Rename Table</h3>
+            <div className="form-group">
+              <label>New Table Name</label>
+              <input type="text" value={newTableName} onChange={e => setNewTableName(e.target.value)} />
+            </div>
+            <div className="actions">
+              <button className="btn-secondary" onClick={() => setRenaming(false)}>Cancel</button>
+              <button className="btn-primary" onClick={() => {
+                if (newTableName && newTableName !== data?.tableName) {
+                  setRenameTo(newTableName);
+                  const sql = `ALTER TABLE ${getEscapedTable()} RENAME TO ${escapeId(newTableName)};`;
+                  appendGeneratedSQL(sql);
+                }
+                setRenaming(false);
+              }} disabled={!newTableName || newTableName === data?.tableName}>Generate Rename SQL</button>
+            </div>
           </div>
         </div>
       )}

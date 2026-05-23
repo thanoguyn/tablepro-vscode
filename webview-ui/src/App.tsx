@@ -5,6 +5,7 @@ import StructureView from './panels/StructureView/StructureView';
 import ERDiagram from './panels/ERDiagram/ERDiagram';
 import QueryPlanView from './panels/QueryPlan/QueryPlanView';
 import QuickView from './panels/QuickView/QuickView';
+import CreateTable from './panels/CreateTable/CreateTable';
 
 declare global {
   interface Window {
@@ -22,6 +23,8 @@ export default function App() {
       return <DataGrid />;
     case 'structureView':
       return <StructureView />;
+    case 'createTable':
+      return <CreateTable />;
     case 'erDiagram':
       return <ERDiagram />;
     case 'queryPlan':

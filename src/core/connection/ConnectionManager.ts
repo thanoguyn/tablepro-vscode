@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { ConnectionConfig, DatabaseType, QueryResult, ServerInfo } from '../types';
 import { DatabaseDriver, DriverFactory } from '../drivers';
 import { ConnectionStorage } from './ConnectionStorage';
+import { ProjectConnectionStorage } from './ProjectConnectionStorage';
 import { SSHTunnelManager, TunnelInfo } from './SSHTunnelManager';
 import { Logger } from '../utils/Logger';
 
@@ -94,10 +95,12 @@ export class ConnectionManager {
 
   /** Connect to a database */
   async connect(id: string): Promise<void> {
-    const config = await this.storage.get(id);
+    let config = await this.storage.get(id);
     if (!config) {
       throw new Error(`Connection not found: ${id}`);
     }
+
+    config = await this.resolvePasswords(config);
 
     // If already connected, disconnect first
     if (this.connections.has(id)) {
@@ -173,7 +176,7 @@ export class ConnectionManager {
     let tunnel: TunnelInfo | undefined;
 
     try {
-      let testConfig = { ...config };
+      let testConfig = await this.resolvePasswords(config);
 
       if (config.ssh.enabled) {
         tunnel = await this.tunnelManager.createTunnel(
@@ -266,5 +269,81 @@ export class ConnectionManager {
     this.tunnelManager.closeAll();
     this._onConnectionChanged.dispose();
     this._onActiveConnectionChanged.dispose();
+  }
+
+  /** Save a connection configuration specifically to a workspace folder */
+  async saveConnectionToProject(config: ConnectionConfig, workspaceFolder: vscode.WorkspaceFolder): Promise<string> {
+    const id = config.id || uuidv4();
+    const toSave: ConnectionConfig = {
+      ...config,
+      id,
+      createdAt: config.createdAt || Date.now(),
+      updatedAt: Date.now(),
+    };
+    if (!toSave.tags.includes('project-config')) {
+      toSave.tags.push('project-config');
+    }
+    toSave.options.tableproProjectConfig = true;
+    toSave.options.tableproWorkspaceRoot = workspaceFolder.uri.fsPath;
+
+    const projectStorage = new ProjectConnectionStorage(this.context);
+    await projectStorage.addConnection(workspaceFolder, toSave);
+    this._onConnectionChanged.fire();
+    return id;
+  }
+
+  private async resolvePasswords(config: ConnectionConfig): Promise<ConnectionConfig> {
+    const resolved = { ...config, ssh: { ...config.ssh } };
+
+    if (resolved.type !== DatabaseType.SQLite) {
+      let pwd = await this.context.secrets.get(`tablepro.pwd.${resolved.id}`);
+      if (!pwd || pwd === '<ask>') {
+        pwd = await vscode.window.showInputBox({
+          prompt: `Enter password for connection ${resolved.name || resolved.host}`,
+          password: true,
+          ignoreFocusOut: true,
+        });
+        if (pwd === undefined) {
+          throw new Error('Connection cancelled: Password required');
+        }
+        await this.context.secrets.store(`tablepro.pwd.${resolved.id}`, pwd);
+      }
+      resolved.password = pwd;
+    }
+
+    if (resolved.ssh.enabled) {
+      if (resolved.ssh.authMethod === 'password') {
+        let sshPwd = await this.context.secrets.get(`tablepro.ssh.pwd.${resolved.id}`);
+        if (!sshPwd || sshPwd === '<ask>') {
+          sshPwd = await vscode.window.showInputBox({
+            prompt: `Enter SSH password for connection ${resolved.name || resolved.host}`,
+            password: true,
+            ignoreFocusOut: true,
+          });
+          if (sshPwd === undefined) {
+            throw new Error('Connection cancelled: SSH password required');
+          }
+          await this.context.secrets.store(`tablepro.ssh.pwd.${resolved.id}`, sshPwd);
+        }
+        resolved.ssh.password = sshPwd;
+      } else if (resolved.ssh.authMethod === 'privateKey') {
+        if (resolved.ssh.passphrase === '<ask>') {
+          let passphrase = await this.context.secrets.get(`tablepro.ssh.pp.${resolved.id}`);
+          if (!passphrase || passphrase === '<ask>') {
+            passphrase = await vscode.window.showInputBox({
+              prompt: `Enter SSH private key passphrase for connection ${resolved.name || resolved.host}`,
+              password: true,
+              ignoreFocusOut: true,
+            });
+            if (passphrase === undefined) {
+              throw new Error('Connection cancelled: SSH passphrase required');
+            }
+            await this.context.secrets.store(`tablepro.ssh.pp.${resolved.id}`, passphrase);
+          }
+          resolved.ssh.passphrase = passphrase;
+        }
+      }
+    }
+    return resolved;
   }
 }

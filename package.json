@@ -2,7 +2,7 @@
   "name": "tablepro-vscode",
   "displayName": "TablePro Vscode - Database Client",
   "description": "A fast, feature-rich database client for VSCode. Connect to MySQL, PostgreSQL, SQLite and more.",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "publisher": "thanoguyn",
   "icon": "media/logo.png",
   "license": "MIT",
@@ -73,10 +73,24 @@
     "onCommand:tablepro.explainPlan",
     "onCommand:tablepro.openTerminal",
     "onCommand:tablepro.clearLogs",
-    "onCommand:tablepro.showLogsOutput"
+    "onCommand:tablepro.showLogsOutput",
+    "onCommand:tablepro.saveConnectionToProject",
+    "onCommand:tablepro.openProjectConfig",
+    "onCommand:tablepro.searchConnections",
+    "onCommand:tablepro.editDatabase",
+    "onCommand:tablepro.createDatabase",
+    "onCommand:tablepro.createTable",
+    "onCommand:tablepro.dumpDatabase",
+    "onCommand:tablepro.importDatabase"
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "jsonValidation": [
+      {
+        "fileMatch": ".tablepro.json",
+        "url": "./resources/connections-schema.json"
+      }
+    ],
     "customEditors": [
       {
         "viewType": "tablepro.sqliteViewer",
@@ -239,8 +253,9 @@
       },
       {
         "command": "tablepro.openStructure",
-        "title": "Open Table Structure",
-        "category": "TablePro"
+        "title": "Edit Table Structure",
+        "category": "TablePro",
+        "icon": "$(edit)"
       },
       {
         "command": "tablepro.showDDL",
@@ -321,6 +336,53 @@
         "title": "Show Log Output",
         "category": "TablePro",
         "icon": "$(output)"
+      },
+      {
+        "command": "tablepro.saveConnectionToProject",
+        "title": "Save Connection to Project Configuration",
+        "category": "TablePro",
+        "icon": "$(save)"
+      },
+      {
+        "command": "tablepro.openProjectConfig",
+        "title": "Open Project Database Configuration File",
+        "category": "TablePro",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "tablepro.searchConnections",
+        "title": "Search Database Connections",
+        "category": "TablePro"
+      },
+      {
+        "command": "tablepro.editDatabase",
+        "title": "Edit Database",
+        "category": "TablePro",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "tablepro.createDatabase",
+        "title": "Create Database",
+        "category": "TablePro",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "tablepro.createTable",
+        "title": "Create New Table",
+        "category": "TablePro",
+        "icon": "$(add)"
+      },
+      {
+        "command": "tablepro.dumpDatabase",
+        "title": "Dump Database (Export SQL)...",
+        "category": "TablePro",
+        "icon": "$(export)"
+      },
+      {
+        "command": "tablepro.importDatabase",
+        "title": "Import Database (SQL File)...",
+        "category": "TablePro",
+        "icon": "$(import)"
       }
     ],
     "menus": {
@@ -344,17 +406,22 @@
           "command": "tablepro.refreshSchema",
           "when": "view == tablepro.databases || view == tablepro.schema",
           "group": "navigation"
+        },
+        {
+          "command": "tablepro.createTable",
+          "when": "view == tablepro.schema && tablepro.hasActiveConnection",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
         {
           "command": "tablepro.connect",
-          "when": "view == tablepro.connections && viewItem == connection-disconnected",
+          "when": "view == tablepro.connections && viewItem =~ /connection-disconnected/",
           "group": "inline"
         },
         {
           "command": "tablepro.disconnect",
-          "when": "view == tablepro.connections && viewItem == connection-connected",
+          "when": "view == tablepro.connections && viewItem =~ /connection-connected/",
           "group": "inline"
         },
         {
@@ -363,24 +430,54 @@
           "group": "1_manage@1"
         },
         {
+          "command": "tablepro.saveConnectionToProject",
+          "when": "view == tablepro.connections && (viewItem == connection-connected || viewItem == connection-disconnected)",
+          "group": "1_manage@2"
+        },
+        {
           "command": "tablepro.newQuery",
-          "when": "view == tablepro.connections && viewItem == connection-connected",
+          "when": "view == tablepro.connections && viewItem =~ /connection-connected/",
           "group": "2_query@1"
         },
         {
           "command": "tablepro.erDiagram",
-          "when": "view == tablepro.connections && viewItem == connection-connected",
+          "when": "view == tablepro.connections && viewItem =~ /connection-connected/",
           "group": "2_query@2"
         },
         {
           "command": "tablepro.openTerminal",
-          "when": "view == tablepro.connections && viewItem == connection-connected",
+          "when": "view == tablepro.connections && viewItem =~ /connection-connected/",
           "group": "2_query@3"
+        },
+        {
+          "command": "tablepro.createDatabase",
+          "when": "view == tablepro.connections && viewItem =~ /connection-connected/",
+          "group": "2_query@4"
         },
         {
           "command": "tablepro.deleteConnection",
           "when": "view == tablepro.connections && viewItem =~ /^connection/",
           "group": "3_danger@1"
+        },
+        {
+          "command": "tablepro.editDatabase",
+          "when": "view == tablepro.databases && viewItem =~ /^database/",
+          "group": "1_actions@1"
+        },
+        {
+          "command": "tablepro.dumpDatabase",
+          "when": "view == tablepro.databases && viewItem =~ /^database/",
+          "group": "1_actions@2"
+        },
+        {
+          "command": "tablepro.importDatabase",
+          "when": "view == tablepro.databases && viewItem =~ /^database/",
+          "group": "1_actions@3"
+        },
+        {
+          "command": "tablepro.createDatabase",
+          "when": "view == tablepro.databases && tablepro.hasActiveConnection",
+          "group": "1_actions@4"
         },
         {
           "command": "tablepro.openTable",

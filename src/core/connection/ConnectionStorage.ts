@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ConnectionConfig } from '../types';
+import { ProjectConnectionStorage } from './ProjectConnectionStorage';
 
 const CONNECTIONS_KEY = 'tablepro.connections';
 
@@ -11,9 +12,19 @@ export class ConnectionStorage {
   constructor(private context: vscode.ExtensionContext) {}
 
   async getAll(): Promise<ConnectionConfig[]> {
-    const connections = this.filterForCurrentWorkspace(
+    const globalConnections = this.filterForCurrentWorkspace(
       this.context.globalState.get<ConnectionConfig[]>(CONNECTIONS_KEY, [])
     );
+
+    const projectStorage = new ProjectConnectionStorage(this.context);
+    const workspaceFolders = vscode.workspace.workspaceFolders || [];
+    const projectConnections: ConnectionConfig[] = [];
+    for (const folder of workspaceFolders) {
+      const folderConns = await projectStorage.loadFromProject(folder);
+      projectConnections.push(...folderConns);
+    }
+
+    const connections = [...globalConnections, ...projectConnections];
 
     // Restore passwords from secret storage
     for (const conn of connections) {
@@ -26,19 +37,22 @@ export class ConnectionStorage {
   }
 
   async get(id: string): Promise<ConnectionConfig | undefined> {
-    const connections = this.context.globalState.get<ConnectionConfig[]>(CONNECTIONS_KEY, []);
-    for (const conn of connections) {
-      if (conn.id !== id) { continue; }
-      conn.password = await this.getPassword(conn.id);
-      if (conn.ssh.enabled && conn.ssh.authMethod === 'password') {
-        conn.ssh.password = await this.getSSHPassword(conn.id);
-      }
-      return conn;
-    }
-    return undefined;
+    const connections = await this.getAll();
+    return connections.find(c => c.id === id);
   }
 
   async save(config: ConnectionConfig): Promise<void> {
+    if (config.options?.tableproProjectConfig === true || config.tags?.includes('project-config')) {
+      const workspaceFolders = vscode.workspace.workspaceFolders || [];
+      const root = config.options?.tableproWorkspaceRoot;
+      const folder = workspaceFolders.find(f => f.uri.fsPath === root) || workspaceFolders[0];
+      if (folder) {
+        const projectStorage = new ProjectConnectionStorage(this.context);
+        await projectStorage.addConnection(folder, config);
+        return;
+      }
+    }
+
     const connections = await this.getAllWithoutPasswords();
 
     const index = connections.findIndex(c => c.id === config.id);
@@ -65,6 +79,18 @@ export class ConnectionStorage {
   }
 
   async delete(id: string): Promise<void> {
+    const conn = await this.get(id);
+    if (conn && (conn.options?.tableproProjectConfig === true || conn.tags?.includes('project-config'))) {
+      const workspaceFolders = vscode.workspace.workspaceFolders || [];
+      const root = conn.options?.tableproWorkspaceRoot;
+      const folder = workspaceFolders.find(f => f.uri.fsPath === root) || workspaceFolders[0];
+      if (folder) {
+        const projectStorage = new ProjectConnectionStorage(this.context);
+        await projectStorage.removeConnection(folder, id);
+        return;
+      }
+    }
+
     const connections = await this.getAllWithoutPasswords();
     const filtered = connections.filter(c => c.id !== id);
     await this.context.globalState.update(CONNECTIONS_KEY, filtered);

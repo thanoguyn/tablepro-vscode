@@ -28,9 +28,12 @@ import {
 } from './core/types';
 import { DriverFactory } from './core/drivers';
 import type { DatabaseDriver } from './core/drivers/DatabaseDriver';
+import { ProjectConnectionStorage } from './core/connection/ProjectConnectionStorage';
+import { DatabaseDumpService } from './core/utils/DatabaseDumpService';
 import { ImportExportService } from './core/utils/ImportExportService';
 
 let connectionManager: ConnectionManager;
+let databaseDumpService: DatabaseDumpService;
 let webviewManager: WebviewManager;
 let connectionTreeProvider: ConnectionTreeProvider;
 let databaseTreeProvider: DatabaseTreeProvider;
@@ -107,12 +110,73 @@ async function getCurrentDatabaseName(connectionId: string): Promise<string> {
   }
 }
 
+function sanitizeFilenamePart(value: string): string {
+  return value.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'database';
+}
+
+function defaultSqlDumpUri(name: string): vscode.Uri {
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  return vscode.Uri.file(path.join(workspaceFolder || os.homedir(), `${sanitizeFilenamePart(name)}_dump.sql`));
+}
+
+async function pickMysqlCharsetOptions(titlePrefix: string): Promise<{ charset: string; collation: string } | undefined> {
+  const charsets = [
+    { label: 'utf8mb4', description: 'Recommended: Full UTF-8 support' },
+    { label: 'utf8', description: 'Standard UTF-8 (3-byte limit)' },
+    { label: 'latin1', description: 'ISO 8859-1 West European' },
+    { label: 'DEFAULT', description: 'Use server default character set' }
+  ];
+
+  const selectedCharset = await vscode.window.showQuickPick(charsets, {
+    title: `${titlePrefix}: Character Set`,
+    placeHolder: 'Choose character set'
+  });
+  if (!selectedCharset) { return undefined; }
+
+  let collation = '';
+  if (selectedCharset.label !== 'DEFAULT') {
+    let collations: { label: string; description: string }[] = [];
+    if (selectedCharset.label === 'utf8mb4') {
+      collations = [
+        { label: 'utf8mb4_0900_ai_ci', description: 'Modern Unicode 9.0 accent/case insensitive' },
+        { label: 'utf8mb4_unicode_ci', description: 'Unicode accent/case insensitive' },
+        { label: 'utf8mb4_general_ci', description: 'General comparison' }
+      ];
+    } else if (selectedCharset.label === 'utf8') {
+      collations = [
+        { label: 'utf8_general_ci', description: 'General collation' },
+        { label: 'utf8_unicode_ci', description: 'Unicode collation' }
+      ];
+    } else if (selectedCharset.label === 'latin1') {
+      collations = [
+        { label: 'latin1_swedish_ci', description: 'Default latin1 collation' },
+        { label: 'latin1_general_ci', description: 'General latin1 collation' }
+      ];
+    }
+
+    if (collations.length > 0) {
+      const selectedCollation = await vscode.window.showQuickPick(
+        [{ label: 'DEFAULT', description: 'Use charset default collation' }, ...collations],
+        {
+          title: `${titlePrefix}: Collation`,
+          placeHolder: 'Choose collation'
+        }
+      );
+      if (!selectedCollation) { return undefined; }
+      collation = selectedCollation.label === 'DEFAULT' ? '' : selectedCollation.label;
+    }
+  }
+
+  return { charset: selectedCharset.label, collation };
+}
+
 export function activate(context: vscode.ExtensionContext) {
   extensionContext = context;
   console.log('TablePro extension activated');
 
   // Initialize core services
   connectionManager = new ConnectionManager(context);
+  databaseDumpService = new DatabaseDumpService(context, connectionManager);
   webviewManager = new WebviewManager(context);
   queryHistory = new QueryHistory(context);
   queryEngine = new QueryEngine(connectionManager, queryHistory);
@@ -139,6 +203,13 @@ export function activate(context: vscode.ExtensionContext) {
   );
   schemaProvider = new SchemaProvider(connectionManager);
   connectionTreeProvider = new ConnectionTreeProvider(connectionManager);
+
+  // File watcher for .tablepro.json project configurations
+  const fileWatcher = vscode.workspace.createFileSystemWatcher('**/.tablepro.json');
+  fileWatcher.onDidChange(() => connectionTreeProvider.refresh());
+  fileWatcher.onDidCreate(() => connectionTreeProvider.refresh());
+  fileWatcher.onDidDelete(() => connectionTreeProvider.refresh());
+  context.subscriptions.push(fileWatcher);
   databaseTreeProvider = new DatabaseTreeProvider(connectionManager);
   schemaTreeProvider = new SchemaTreeProvider(connectionManager);
 
@@ -255,6 +326,509 @@ export function activate(context: vscode.ExtensionContext) {
       const config = createDefaultConnectionConfig(selected.type);
       openConnectionForm(config);
     }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.saveConnectionToProject', async (item?: any) => {
+      const id = item?.config?.id || item;
+      let config: ConnectionConfig | undefined;
+      const allConfigs = await connectionManager.getSavedConnections();
+
+      if (id) {
+        config = allConfigs.find(c => c.id === id);
+      } else {
+        const globalConfigs = allConfigs.filter(c => !c.options?.tableproProjectConfig && !c.tags?.includes('project-config'));
+        if (globalConfigs.length === 0) {
+          vscode.window.showInformationMessage('No global connections to save to project.');
+          return;
+        }
+        const pick = await vscode.window.showQuickPick(
+          globalConfigs.map(c => ({ label: c.name || 'Untitled', description: c.host, config: c })),
+          { placeHolder: 'Select connection to save to project' }
+        );
+        if (pick) {
+          config = pick.config;
+        }
+      }
+
+      if (!config) { return; }
+
+      const folders = vscode.workspace.workspaceFolders;
+      if (!folders || folders.length === 0) {
+        vscode.window.showErrorMessage('No workspace folder open. Cannot save project connection config.');
+        return;
+      }
+
+      let selectedFolder = folders[0];
+      if (folders.length > 1) {
+        const folderPick = await vscode.window.showWorkspaceFolderPick({
+          placeHolder: 'Select workspace folder to save connection config to',
+        });
+        if (!folderPick) { return; }
+        selectedFolder = folderPick;
+      }
+
+      try {
+        await connectionManager.saveConnectionToProject(config, selectedFolder);
+        vscode.window.showInformationMessage(`Saved connection "${config.name}" to project in workspace folder "${selectedFolder.name}".`);
+        connectionTreeProvider.refresh();
+      } catch (err) {
+        vscode.window.showErrorMessage(`Failed to save connection to project: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.openProjectConfig', async () => {
+      const folders = vscode.workspace.workspaceFolders;
+      if (!folders || folders.length === 0) {
+        vscode.window.showErrorMessage('No workspace folder open.');
+        return;
+      }
+
+      let selectedFolder = folders[0];
+      if (folders.length > 1) {
+        const folderPick = await vscode.window.showWorkspaceFolderPick({
+          placeHolder: 'Select workspace folder to open .tablepro.json from',
+        });
+        if (!folderPick) { return; }
+        selectedFolder = folderPick;
+      }
+
+      const filePath = path.join(selectedFolder.uri.fsPath, '.tablepro.json');
+      if (!fs.existsSync(filePath)) {
+        const create = await vscode.window.showInformationMessage(
+          `No .tablepro.json file found in "${selectedFolder.name}". Create one now?`,
+          'Create'
+        );
+        if (create === 'Create') {
+          const projectStorage = new ProjectConnectionStorage(context);
+          await projectStorage.saveToProject(selectedFolder, []);
+        } else {
+          return;
+        }
+      }
+
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+      await vscode.window.showTextDocument(doc);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.searchConnections', async () => {
+      const allConfigs = await connectionManager.getSavedConnections();
+      if (allConfigs.length === 0) {
+        vscode.window.showInformationMessage('No saved connections found.');
+        return;
+      }
+
+      const quickPick = vscode.window.createQuickPick();
+      quickPick.title = 'Search Database Connections';
+      quickPick.placeholder = 'Type to filter connections by name, host, database, type, or tags...';
+      quickPick.ignoreFocusOut = true;
+
+      const connectButton = {
+        iconPath: new vscode.ThemeIcon('plug'),
+        tooltip: 'Connect'
+      };
+      const disconnectButton = {
+        iconPath: new vscode.ThemeIcon('debug-disconnect'),
+        tooltip: 'Disconnect'
+      };
+      const editButton = {
+        iconPath: new vscode.ThemeIcon('edit'),
+        tooltip: 'Edit Connection'
+      };
+      const deleteButton = {
+        iconPath: new vscode.ThemeIcon('trash'),
+        tooltip: 'Delete Connection'
+      };
+
+      const mapConfigToItem = (c: ConnectionConfig) => {
+        const isConnected = connectionManager.isConnected(c.id);
+        const isProject = c.options?.tableproProjectConfig === true || c.tags?.includes('project-config');
+        const prefix = isProject ? '$(project) ' : '$(database) ';
+        const statusText = isConnected ? '🟢 Connected' : '⚫ Disconnected';
+
+        let desc = '';
+        if (c.type === DatabaseType.SQLite) {
+          desc = c.filepath || c.database || '';
+        } else {
+          desc = `${c.host}:${c.port}${c.database ? '/' + c.database : ''}`;
+        }
+
+        const buttons: vscode.QuickInputButton[] = [];
+        if (isConnected) {
+          buttons.push(disconnectButton);
+        } else {
+          buttons.push(connectButton);
+        }
+        buttons.push(editButton, deleteButton);
+
+        return {
+          label: `${prefix}${c.name || 'Untitled'}`,
+          description: `${desc} • ${statusText}`,
+          detail: `Type: ${c.type} | Group: ${c.group || 'None'} | Tags: ${c.tags.join(', ') || 'None'}`,
+          config: c,
+          buttons
+        };
+      };
+
+      quickPick.items = allConfigs.map(mapConfigToItem);
+
+      quickPick.onDidAccept(async () => {
+        const selectedItem = quickPick.selectedItems[0] as any;
+        if (!selectedItem) { return; }
+        quickPick.hide();
+
+        const config = selectedItem.config;
+        const isConnected = connectionManager.isConnected(config.id);
+
+        if (isConnected) {
+          try {
+            await connectionManager.selectConnection(config.id);
+            vscode.window.showInformationMessage(`Switched to active connection: ${config.name}`);
+          } catch (err) {
+            vscode.window.showErrorMessage(`Failed to select connection: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        } else {
+          try {
+            await vscode.window.withProgress(
+              { location: vscode.ProgressLocation.Notification, title: 'Connecting...', cancellable: false },
+              () => connectionManager.connect(config.id)
+            );
+            vscode.window.showInformationMessage(`Connected to ${config.name}`);
+          } catch (err) {
+            vscode.window.showErrorMessage(`Failed to connect: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      });
+
+      quickPick.onDidTriggerItemButton(async (e) => {
+        const item = e.item as any;
+        const config = item.config;
+        const button = e.button;
+
+        quickPick.hide();
+
+        if (button.tooltip === 'Connect') {
+          try {
+            await vscode.window.withProgress(
+              { location: vscode.ProgressLocation.Notification, title: 'Connecting...', cancellable: false },
+              () => connectionManager.connect(config.id)
+            );
+            vscode.window.showInformationMessage(`Connected to ${config.name}`);
+          } catch (err) {
+            vscode.window.showErrorMessage(`Failed to connect: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        } else if (button.tooltip === 'Disconnect') {
+          try {
+            await connectionManager.disconnect(config.id);
+            vscode.window.showInformationMessage(`Disconnected from ${config.name}`);
+          } catch (err) {
+            vscode.window.showErrorMessage(`Failed to disconnect: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        } else if (button.tooltip === 'Edit Connection') {
+          vscode.commands.executeCommand('tablepro.editConnection', config.id);
+        } else if (button.tooltip === 'Delete Connection') {
+          vscode.commands.executeCommand('tablepro.deleteConnection', config.id);
+        }
+      });
+
+      quickPick.show();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.editDatabase', async (item?: any) => {
+      let connectionId = item?.connectionId || connectionManager.activeConnectionId;
+      if (!connectionId) {
+        vscode.window.showErrorMessage('No active connection. Please connect to a database first.');
+        return;
+      }
+
+      const activeConn = connectionManager.getActiveConnection(connectionId);
+      if (!activeConn) {
+        vscode.window.showErrorMessage('Connection not found or not connected.');
+        return;
+      }
+
+      const dbName = item?.dbName || await getCurrentDatabaseName(connectionId);
+      if (!dbName) {
+        vscode.window.showErrorMessage('No database selected.');
+        return;
+      }
+
+      if (activeConn.config.type !== DatabaseType.MySQL && activeConn.config.type !== DatabaseType.MariaDB) {
+        vscode.window.showWarningMessage('Changing database charset is only supported for MySQL/MariaDB.');
+        return;
+      }
+
+      const charsetOptions = await pickMysqlCharsetOptions(`Edit database "${dbName}"`);
+      if (!charsetOptions || charsetOptions.charset === 'DEFAULT') { return; }
+
+      const collationSql = charsetOptions.collation ? ` COLLATE ${charsetOptions.collation}` : '';
+      const sql = `ALTER DATABASE ${activeConn.driver.escapeIdentifier(dbName)} CHARACTER SET ${charsetOptions.charset}${collationSql}`;
+
+      try {
+        await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `Updating database "${dbName}"...`, cancellable: false },
+          async () => {
+            await connectionManager.query(connectionId!, sql);
+          }
+        );
+        vscode.window.showInformationMessage(`Database "${dbName}" updated successfully.`);
+        databaseTreeProvider.refresh();
+        schemaTreeProvider.clearCache();
+        schemaTreeProvider.refresh();
+      } catch (err) {
+        vscode.window.showErrorMessage(`Failed to edit database: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.createDatabase', async (item?: any) => {
+      let connectionId = item?.config?.id || connectionManager.activeConnectionId;
+      if (!connectionId) {
+        vscode.window.showErrorMessage('No active connection. Please connect to a database first.');
+        return;
+      }
+
+      const activeConn = connectionManager.getActiveConnection(connectionId);
+      if (!activeConn) {
+        vscode.window.showErrorMessage('Connection not found or not connected.');
+        return;
+      }
+
+      const type = activeConn.config.type;
+
+      if (type === DatabaseType.SQLite) {
+        const fileUri = await vscode.window.showSaveDialog({
+          filters: { 'SQLite Database': ['sqlite', 'db', 'sqlite3'] },
+          title: 'Create New SQLite Database File',
+        });
+        if (!fileUri) { return; }
+
+        const filepath = fileUri.fsPath;
+        try {
+          fs.writeFileSync(filepath, new Uint8Array(0));
+
+          const newConfig = connectionManager.createConnectionConfig(DatabaseType.SQLite);
+          newConfig.name = `SQLite - ${path.basename(filepath)}`;
+          newConfig.filepath = filepath;
+          newConfig.database = filepath;
+
+          const newId = await connectionManager.saveConnection(newConfig);
+          await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: 'Connecting to new SQLite database...', cancellable: false },
+            () => connectionManager.connect(newId)
+          );
+          vscode.window.showInformationMessage(`Created and connected to SQLite database: ${path.basename(filepath)}`);
+          connectionTreeProvider.refresh();
+        } catch (err) {
+          vscode.window.showErrorMessage(`Failed to create SQLite database: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
+
+      const dbName = await vscode.window.showInputBox({
+        prompt: 'Enter the name of the new database',
+        placeHolder: 'my_new_database',
+        validateInput: (value) => {
+          if (!value || value.trim().length === 0) {
+            return 'Database name cannot be empty';
+          }
+          if (!/^[a-zA-Z0-9_-]+$/.test(value)) {
+            return 'Database name can only contain alphanumeric characters, underscores, and hyphens';
+          }
+          return null;
+        }
+      });
+
+      if (!dbName) { return; }
+
+      let sql = '';
+
+      if (type === DatabaseType.MySQL || type === DatabaseType.MariaDB) {
+        const charsets = [
+          { label: 'utf8mb4', description: 'Recommended: Full UTF-8 support (including emojis)' },
+          { label: 'utf8', description: 'Standard UTF-8 (3-byte limit)' },
+          { label: 'latin1', description: 'ISO 8859-1 West European' },
+          { label: 'DEFAULT', description: 'Use server default character set' }
+        ];
+        const selectedCharset = await vscode.window.showQuickPick(charsets, {
+          title: 'Select Character Set',
+          placeHolder: 'Choose character set for the database'
+        });
+        if (!selectedCharset) { return; }
+
+        let collation = '';
+        if (selectedCharset.label !== 'DEFAULT') {
+          let collations: { label: string; description: string }[] = [];
+          if (selectedCharset.label === 'utf8mb4') {
+            collations = [
+              { label: 'utf8mb4_0900_ai_ci', description: 'Recommended: Modern Unicode 9.0 accent/case insensitive' },
+              { label: 'utf8mb4_unicode_ci', description: 'Unicode accent/case insensitive' },
+              { label: 'utf8mb4_general_ci', description: 'Faster but slightly less accurate general comparison' }
+            ];
+          } else if (selectedCharset.label === 'utf8') {
+            collations = [
+              { label: 'utf8_general_ci', description: 'Standard general collation' },
+              { label: 'utf8_unicode_ci', description: 'Standard Unicode collation' }
+            ];
+          }
+
+          if (collations.length > 0) {
+            const selectedCollation = await vscode.window.showQuickPick(collations, {
+              title: 'Select Collation',
+              placeHolder: 'Choose collation'
+            });
+            if (!selectedCollation) { return; }
+            collation = selectedCollation.label;
+          }
+        }
+
+        sql = `CREATE DATABASE \`${dbName}\``;
+        if (selectedCharset.label !== 'DEFAULT') {
+          sql += ` CHARACTER SET ${selectedCharset.label}`;
+          if (collation) {
+            sql += ` COLLATE ${collation}`;
+          }
+        }
+
+      } else if (type === DatabaseType.PostgreSQL) {
+        const encodings = [
+          { label: 'UTF8', description: 'Recommended: Unicode encoding' },
+          { label: 'SQL_ASCII', description: 'Standard ASCII' },
+          { label: 'LATIN1', description: 'ISO 8859-1 West European' },
+          { label: 'DEFAULT', description: 'Use template default encoding' }
+        ];
+        const selectedEncoding = await vscode.window.showQuickPick(encodings, {
+          title: 'Select Database Encoding',
+          placeHolder: 'Choose encoding'
+        });
+        if (!selectedEncoding) { return; }
+
+        const templates = [
+          { label: 'DEFAULT', description: 'Use default template (usually template1)' },
+          { label: 'template1', description: 'Standard PG template database' }
+        ];
+        const selectedTemplate = await vscode.window.showQuickPick(templates, {
+          title: 'Select Base Template',
+          placeHolder: 'Choose template database'
+        });
+        if (!selectedTemplate) { return; }
+
+        sql = `CREATE DATABASE "${dbName}"`;
+        if (selectedEncoding.label !== 'DEFAULT') {
+          sql += ` ENCODING '${selectedEncoding.label}'`;
+        }
+        if (selectedTemplate.label !== 'DEFAULT') {
+          sql += ` TEMPLATE ${selectedTemplate.label}`;
+        }
+      } else {
+        vscode.window.showErrorMessage(`Database creation is not supported for driver type: ${type}`);
+        return;
+      }
+
+      try {
+        await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `Creating database "${dbName}"...`, cancellable: false },
+          async () => {
+            await connectionManager.query(connectionId, sql);
+          }
+        );
+        vscode.window.showInformationMessage(`Database "${dbName}" created successfully.`);
+        vscode.commands.executeCommand('tablepro.refreshSchema');
+      } catch (err) {
+        vscode.window.showErrorMessage(`Failed to create database: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.dumpDatabase', async (item?: any) => {
+      let connectionId = item?.connectionId || item?.config?.id || (typeof item === 'string' ? item : undefined) || connectionManager.activeConnectionId;
+      if (!connectionId) {
+        vscode.window.showErrorMessage('No active connection selected for dump.');
+        return;
+      }
+
+      const activeConn = connectionManager.getActiveConnection(connectionId);
+      if (!activeConn) {
+        vscode.window.showErrorMessage('Connection is not active. Please connect first.');
+        return;
+      }
+
+      const databaseName = item?.dbName || await getCurrentDatabaseName(connectionId);
+      const dumpName = databaseName || activeConn.config.database || activeConn.config.name || 'database';
+
+      const typeItems = [
+        { label: 'Full Dump', value: 'full', description: 'Export both schema and data' },
+        { label: 'Schema Only', value: 'schema-only', description: 'Export schema structure only' },
+        { label: 'Data Only', value: 'data-only', description: 'Export records/data insert statements only' }
+      ];
+
+      const selectedType = await vscode.window.showQuickPick(typeItems, {
+        placeHolder: 'Select dump type'
+      });
+      if (!selectedType) return;
+
+      const fileUri = await vscode.window.showSaveDialog({
+        defaultUri: defaultSqlDumpUri(dumpName),
+        filters: {
+          'SQL Dump File': ['sql']
+        }
+      });
+
+      if (!fileUri) return;
+
+      try {
+        await databaseDumpService.dump(connectionId, {
+          type: selectedType.value as any,
+          outputPath: fileUri.fsPath,
+          databaseName
+        });
+        vscode.window.showInformationMessage(`Database dumped successfully to ${path.basename(fileUri.fsPath)}`);
+      } catch (err) {
+        vscode.window.showErrorMessage(`Database dump failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.importDatabase', async (item?: any) => {
+      let connectionId = item?.connectionId || item?.config?.id || (typeof item === 'string' ? item : undefined) || connectionManager.activeConnectionId;
+      if (!connectionId) {
+        vscode.window.showErrorMessage('No active connection selected for import.');
+        return;
+      }
+
+      const databaseName = item?.dbName || await getCurrentDatabaseName(connectionId);
+
+      const fileUris = await vscode.window.showOpenDialog({
+        canSelectMany: false,
+        filters: {
+          'SQL File': ['sql']
+        },
+        openLabel: 'Import'
+      });
+
+      if (!fileUris || fileUris.length === 0) return;
+      const fileUri = fileUris[0];
+
+      try {
+        await databaseDumpService.import(connectionId, {
+          inputPath: fileUri.fsPath,
+          databaseName
+        });
+        vscode.window.showInformationMessage(`Database imported successfully from ${path.basename(fileUri.fsPath)}`);
+        vscode.commands.executeCommand('tablepro.refreshSchema');
+      } catch (err) {
+        vscode.window.showErrorMessage(`Database import failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    })
   );
 
   context.subscriptions.push(
@@ -811,6 +1385,17 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand('tablepro.createTable', async (item?: any) => {
+      let connectionId = item?.connectionId || item?.config?.id || connectionManager.activeConnectionId;
+      if (!connectionId) {
+        vscode.window.showErrorMessage('No active connection. Connect to a database first.');
+        return;
+      }
+      openCreateTable(connectionId);
+    }),
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand('tablepro.truncateTable', async (item?: any) => {
       let connectionId = item?.connectionId || connectionManager.activeConnectionId;
       let tableInfo = item?.tableInfo;
@@ -1208,27 +1793,27 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
 
-    const tableName = tableInfo.name;
+    let currentTableName = tableInfo.name;
     const schemaName = tableInfo.schema;
-    const panelId = `table-structure-${connectionId}-${schemaName || 'default'}-${tableName}`;
-    const title = `🔧 Structure: ${tableName}`;
+    const panelId = `table-structure-${connectionId}-${schemaName || 'default'}-${currentTableName}`;
+    const title = `🔧 Structure: ${currentTableName}`;
 
-    webviewManager.showPanel(panelId, title, 'structureView', async (message: WebviewMessage) => {
+    const panel = webviewManager.showPanel(panelId, title, 'structureView', async (message: WebviewMessage) => {
       if (message.type === 'ready') {
         try {
-          const columns = await driver.getColumns(tableName, schemaName);
-          const indexes = await driver.getIndexes(tableName, schemaName);
-          const foreignKeys = await driver.getForeignKeys(tableName, schemaName);
+          const columns = await driver.getColumns(currentTableName, schemaName);
+          const indexes = await driver.getIndexes(currentTableName, schemaName);
+          const foreignKeys = await driver.getForeignKeys(currentTableName, schemaName);
 
           let ddl = '';
           if (driver.driverType === 'mysql') {
-            const result = await driver.query(`SHOW CREATE TABLE ${driver.escapeIdentifier(tableName)}`);
+            const result = await driver.query(`SHOW CREATE TABLE ${driver.escapeIdentifier(currentTableName)}`);
             ddl = result.rows[0]?.[1] as string || '';
           } else if (driver.driverType === 'postgresql') {
-            ddl = generateCreateTableDDL(tableName, columns, driver);
+            ddl = generateCreateTableDDL(currentTableName, columns, driver);
           } else if (driver.driverType === 'sqlite') {
             const result = await driver.query(
-              `SELECT sql FROM sqlite_master WHERE type='table' AND name=${driver.escapeValue(tableName)}`
+              `SELECT sql FROM sqlite_master WHERE type='table' AND name=${driver.escapeValue(currentTableName)}`
             );
             ddl = result.rows[0]?.[0] as string || '';
           }
@@ -1236,7 +1821,7 @@ export function activate(context: vscode.ExtensionContext) {
           webviewManager.postMessage(panelId, {
             type: 'structureData',
             data: {
-              tableName,
+              tableName: currentTableName,
               schemaName,
               columns,
               indexes,
@@ -1249,10 +1834,38 @@ export function activate(context: vscode.ExtensionContext) {
         }
       }
 
+      if (message.type === 'getDriverType') {
+        webviewManager.postMessage(panelId, {
+          type: 'driverType',
+          data: { type: driver.driverType }
+        });
+      }
+
+      if (message.type === 'getTableList') {
+        try {
+          const tables = await driver.getTables(message.data?.schemaName || schemaName);
+          webviewManager.postMessage(panelId, {
+            type: 'tableList',
+            data: { tables }
+          });
+        } catch (err) {
+          webviewManager.postMessage(panelId, {
+            type: 'error',
+            data: { message: `Failed to load table list: ${err instanceof Error ? err.message : String(err)}` }
+          });
+        }
+      }
+
       if (message.type === 'executeDDL') {
         try {
           const sql = message.data.sql;
-          await driver.query(sql);
+          await driver.queryMultiple(sql);
+
+          if (message.data.renameTo) {
+            currentTableName = message.data.renameTo;
+            panel.title = `🔧 Structure: ${currentTableName}`;
+          }
+
           vscode.window.showInformationMessage('Structure updated successfully.');
           webviewManager.postMessage(panelId, { type: 'reloadStructure' });
           schemaTreeProvider.clearCache();
@@ -1260,6 +1873,55 @@ export function activate(context: vscode.ExtensionContext) {
           schemaProvider.refresh();
         } catch (err) {
           vscode.window.showErrorMessage(`Failed to apply changes: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+    });
+  }
+
+  async function openCreateTable(connectionId: string) {
+    const driver = connectionManager.getDriver(connectionId);
+    if (!driver) {
+      vscode.window.showErrorMessage('Not connected.');
+      return;
+    }
+
+    const panelId = `create-table-${connectionId}`;
+    const title = `➕ Create Table`;
+
+    webviewManager.showPanel(panelId, title, 'createTable', async (message: WebviewMessage) => {
+      if (message.type === 'ready' || message.type === 'getDriverType') {
+        webviewManager.postMessage(panelId, {
+          type: 'driverType',
+          data: { type: driver.driverType }
+        });
+      }
+
+      if (message.type === 'ready' || message.type === 'getTableList') {
+        try {
+          const tables = await driver.getTables(message.type === 'getTableList' ? message.data?.schemaName : undefined);
+          webviewManager.postMessage(panelId, {
+            type: 'tableList',
+            data: { tables }
+          });
+        } catch (err) {
+          webviewManager.postMessage(panelId, {
+            type: 'error',
+            data: { message: `Failed to load table list: ${err instanceof Error ? err.message : String(err)}` }
+          });
+        }
+      }
+
+      if (message.type === 'executeCreateTable') {
+        try {
+          const sql = message.data.sql;
+          await driver.queryMultiple(sql);
+          vscode.window.showInformationMessage(`Table "${message.data.tableName}" created successfully.`);
+          webviewManager.closePanel(panelId);
+          schemaTreeProvider.clearCache();
+          schemaTreeProvider.refresh();
+          schemaProvider.refresh();
+        } catch (err) {
+          vscode.window.showErrorMessage(`Failed to create table: ${err instanceof Error ? err.message : err}`);
         }
       }
     });
@@ -2382,7 +3044,7 @@ async function scanWorkspaceForDatabaseConfigs() {
             const fileName = path.basename(filePath);
             const dirName = path.basename(path.dirname(filePath));
             const locationLabel = dirName === workspaceName ? fileName : `${dirName}/${fileName}`;
-            
+
             const newConfig: ConnectionConfig = {
               id: uuidv4(),
               name: `${workspaceName} - ${config.database ? path.basename(config.database) : 'db'} (${config.type})`,

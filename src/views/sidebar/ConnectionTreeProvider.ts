@@ -23,15 +23,21 @@ class ConnectionItem extends vscode.TreeItem {
     super(config.name || 'Untitled', vscode.TreeItemCollapsibleState.None);
 
     const meta = DATABASE_TYPE_META[config.type] || { label: config.type, icon: '$(database)' };
+    const isProject = config.options?.tableproProjectConfig === true || config.tags?.includes('project-config');
 
-    this.description = connected
-      ? `${meta.label} • Connected`
-      : meta.label;
+    this.description = isProject
+      ? (connected ? `[Project] ${meta.label} • Connected` : `[Project] ${meta.label}`)
+      : (connected ? `${meta.label} • Connected` : meta.label);
 
     this.tooltip = this.buildTooltip(config, connected, meta.label);
 
-    this.iconPath = this.getIcon(config.type, connected);
-    this.contextValue = connected ? 'connection-connected' : 'connection-disconnected';
+    this.iconPath = this.getIcon(config.type, connected, isProject);
+
+    if (isProject) {
+      this.contextValue = connected ? 'connection-connected-project' : 'connection-disconnected-project';
+    } else {
+      this.contextValue = connected ? 'connection-connected' : 'connection-disconnected';
+    }
 
     this.command = {
       command: connected ? 'tablepro.selectConnection' : 'tablepro.connect',
@@ -65,7 +71,10 @@ class ConnectionItem extends vscode.TreeItem {
     return md;
   }
 
-  private getIcon(type: DatabaseType, connected: boolean): vscode.ThemeIcon {
+  private getIcon(type: DatabaseType, connected: boolean, isProject: boolean): vscode.ThemeIcon {
+    if (isProject) {
+      return new vscode.ThemeIcon('project', connected ? new vscode.ThemeColor('charts.green') : undefined);
+    }
     if (connected) {
       return new vscode.ThemeIcon('database', new vscode.ThemeColor('charts.green'));
     }
